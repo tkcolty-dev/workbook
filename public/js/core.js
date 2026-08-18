@@ -149,7 +149,7 @@ export function countdown(iso) { const n = daysUntil(iso); if (n < 0) return `${
 export function ago(ts) { const s = (Date.now() - ts) / 1000; if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm ago'; if (s < 86400) return Math.floor(s / 3600) + 'h ago'; return Math.floor(s / 86400) + 'd ago'; }
 
 export const TYPES = { test: 'Test', quiz: 'Quiz', homework: 'Homework', project: 'Project', reminder: 'Reminder', other: 'Other' };
-export const COLORS = ['navy', 'red', 'green', 'yellow', 'purple', 'teal', 'orange', 'pink', 'black'];
+export const COLORS = ['navy', 'red', 'green', 'yellow', 'purple', 'teal', 'orange', 'pink', 'black', 'white'];
 
 // ---------- data loaders ----------
 export async function loadNotebooks(force) { if (!state.notebooks || force) state.notebooks = await api('/notebooks'); return state.notebooks; }
