@@ -523,3 +523,10 @@ kbd { font-family: inherit; font-size: 11px; background: var(--line-2); border: 
 .tstyle.on { border-color: var(--accent); background: var(--accent-soft); }
 .slide-scan .open-pg { position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,.9); border-radius: 12px; padding: 4px; }
 @media (max-width: 700px) { .test-styles { grid-template-columns: 1fr; } }
+
+/* test player extras */
+.hint-box { margin: 6px 0 10px; padding: 8px 12px; border-radius: 8px; background: var(--amber-soft); color: #7a4d00; font-size: 14px; }
+.q.flagged { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-soft); }
+.q input.fillin { max-width: 420px; }
+.test-cfg input[type=range] { width: 100%; accent-color: var(--accent); }
+.test-cfg textarea { min-height: 64px; }

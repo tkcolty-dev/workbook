@@ -306,8 +306,8 @@ function pagesText(d, pageIds) {
   const pages = d.pages.filter(p => pageIds.includes(p.id)).sort((a, b) => a.index - b.index);
   return pages.map(p => { const nb = d.notebooks.find(n => n.id === p.notebookId); return `### ${nb?.name || 'Notebook'} — page ${p.index}${p.title ? ': ' + p.title : ''}\n${p.transcript || '(no transcript yet)'}`; }).join('\n\n');
 }
-function studyContext(d, s) {
-  const notes = pagesText(d, s.pageIds || []);
+function studyContext(d, s, pageIds) {
+  const notes = pagesText(d, pageIds && pageIds.length ? pageIds : (s.pageIds || []));
   return `SUBJECT: ${s.subject || 'unknown'}\nTOPIC / TEST: ${s.title}${s.topic ? '\nTOPIC DETAILS: ' + s.topic : ''}\n\nSTUDENT'S NOTEBOOK NOTES:\n${notes || '(no notebook pages selected — use the topic only)'}`;
 }
 app.get('/api/study', auth, (req, res) => res.json(store.db(req.user.id).study.map(s => ({ ...s, chat: undefined }))));
@@ -401,69 +401,85 @@ Only include real links you found. Prefer free resources.`,
   } catch (e) { console.error('online:', e.message); res.status(500).json({ error: e.message }); }
 });
 
+const TYPE_DESC = { mc: 'mc = multiple choice with 4 choices (answer = index 0-3)', tf: 'tf = true/false (answer = true|false)', short: 'short = short written answer (answer = model answer)', fill: 'fill = fill-in-the-blank: the question contains one blank written as ____ and answer = the missing word/number', explain: 'explain = longer written explanation / show-your-work (answer = model answer with the key points)' };
 app.post('/api/study/:id/test', auth, async (req, res) => {
   const [d, s] = getStudy(req, res); if (!s) return;
-  const count = Math.max(3, Math.min(30, parseInt(req.body.count) || 10));
-  const types = Array.isArray(req.body.types) && req.body.types.length ? req.body.types : ['mc', 'tf', 'short'];
-  const difficulty = req.body.difficulty || 'mixed';
+  const count = Math.max(1, Math.min(50, parseInt(req.body.count) || 10));
+  const types = (Array.isArray(req.body.types) ? req.body.types : ['mc', 'tf', 'short']).filter(t => TYPE_DESC[t]);
+  if (!types.length) types.push('mc', 'tf', 'short');
+  const diffN = Math.max(1, Math.min(5, parseInt(req.body.difficulty) || 3));
+  const difficulty = ['very easy (basic recall, friendly wording)', 'easy', 'medium / mixed', 'hard (multi-step, apply ideas)', 'very hard (tricky, exam-level, combine ideas)'][diffN - 1];
   const style = req.body.style === 'remake' ? 'remake' : 'standard';
   const about = String(req.body.about || '').slice(0, 1000);
+  const instructions = String(req.body.instructions || '').slice(0, 2000);
+  const wantHints = req.body.hints !== false;
+  const pageIds = Array.isArray(req.body.pageIds) ? req.body.pageIds.filter(id => (s.pageIds || []).includes(id)) : [];
   try {
     const seen = s.tests?.length ? 'Avoid repeating these earlier questions: ' + s.tests.flatMap(t => t.questions.map(q => q.question)).slice(-40).join(' | ') : '';
+    const extra = `${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about : ''}${instructions ? '\nSTUDENT\'S INSTRUCTIONS FOR THIS TEST (follow them closely): ' + instructions : ''}`;
+    const hintLine = wantHints ? '\nFor every question also give a "hint": one short nudge that helps without giving the answer away.' : '';
     const prompt = style === 'remake'
-      ? `${studyContext(d, s)}\n${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about + '\n' : ''}
-Make a PRACTICE WORKSHEET that is a copy of the student's page(s) but with DIFFERENT NUMBERS / values / examples: keep the same kinds of problems, the same order and the same difficulty, and the same skills being practiced (e.g. if the page has "3/4 + 1/8", write "2/5 + 3/10"; if it has a definition to fill in, ask for a similar term from the same topic; if it has a worked example, give a fresh one to solve). Aim for about ${count} problems (fewer only if the page has fewer). Every problem is a short-answer question the student solves and types; give the exact model answer and a short solution/explanation. ${seen}
+      ? `${studyContext(d, s, pageIds)}\n${extra}
+Make a PRACTICE WORKSHEET that is a copy of the student's page(s) but with DIFFERENT NUMBERS / values / examples: keep the same kinds of problems, the same order and the same difficulty, and the same skills being practiced (e.g. if the page has "3/4 + 1/8", write "2/5 + 3/10"; if it has a definition to fill in, ask for a similar term from the same topic; if it has a worked example, give a fresh one to solve). Aim for about ${count} problems (fewer only if the page has fewer). Difficulty: ${difficulty}. Every problem is a short-answer question the student solves and types; give the exact model answer and a short solution/explanation.${hintLine} ${seen}
 Return ONLY JSON:
 {"title":"...","description":"1-2 sentences: what this worksheet practices and where it came from","questions":[
- {"id":"q1","type":"short","question":"the new problem (LaTeX for math)","answer":"model answer","explanation":"short solution steps"}
+ {"id":"q1","type":"short","question":"the new problem (LaTeX for math)","answer":"model answer","explanation":"short solution steps","hint":"..."}
 ]}`
-      : `${studyContext(d, s)}\n${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about + '\n' : ''}
-Write a practice test with exactly ${count} questions. Allowed question types: ${types.join(', ')} (mc = multiple choice with 4 choices, tf = true/false, short = short written answer). Difficulty: ${difficulty}. Cover the material evenly; make it feel like a real school test on this topic. ${seen}
+      : `${studyContext(d, s, pageIds)}\n${extra}
+Write a practice test with exactly ${count} questions. Allowed question types (use a good mix of the allowed ones): ${types.map(t => TYPE_DESC[t]).join('; ')}. Difficulty: ${difficulty}. Cover the material evenly; make it feel like a real school test on this topic.${hintLine} ${seen}
 Return ONLY JSON:
 {"title":"...","description":"1-2 sentences: what this test covers and what to focus on","questions":[
- {"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why"},
- {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why"},
- {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"what a good answer must include"}
+ {"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why","hint":"..."},
+ {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why","hint":"..."},
+ {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"what a good answer must include","hint":"..."},
+ {"id":"q4","type":"fill","question":"The powerhouse of the cell is the ____.","answer":"mitochondria","explanation":"...","hint":"..."},
+ {"id":"q5","type":"explain","question":"Explain why ...","answer":"model answer with key points","explanation":"rubric: what earns full credit","hint":"..."}
 ]}`;
     const out = await ai.completeJSON({
       system: 'You are an expert teacher who writes fair, accurate practice tests and worksheets. Output ONLY JSON. Inside JSON strings, write math as LaTeX with $...$ (escape backslashes as \\\\ for valid JSON).\n' + MATH_RULES,
-      prompt, maxTokens: 6000, effort: 'medium',
+      prompt, maxTokens: 7000, effort: 'medium',
     });
-    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : ' Practice Test'), description: String(out.description || ''), style, about, questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1), type: style === 'remake' ? 'short' : q.type })), createdAt: Date.now(), attempts: [] };
+    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : ' Practice Test'), description: String(out.description || ''), style, about, instructions, difficulty: diffN, pageIds, questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1), type: style === 'remake' ? 'short' : (TYPE_DESC[q.type] ? q.type : 'short'), hint: wantHints ? String(q.hint || '') : '' })), createdAt: Date.now(), attempts: [] };
     if (!test.questions.length) throw new Error('The AI returned no questions — try again');
     s.tests.push(test); s.updatedAt = Date.now(); store.save(req.user.id);
     res.json(test);
   } catch (e) { console.error('test:', e.message); res.status(500).json({ error: e.message }); }
 });
 
+const norm = (v) => String(v ?? '').toLowerCase().replace(/[$\\{}]/g, '').replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
 app.post('/api/study/:id/test/:tid/grade', auth, async (req, res) => {
   const [d, s] = getStudy(req, res); if (!s) return;
   const test = s.tests.find(t => t.id === req.params.tid);
   if (!test) return res.status(404).json({ error: 'Test not found' });
   const answers = req.body.answers || {};
+  const dryRun = !!req.body.dryRun;
+  const only = Array.isArray(req.body.questionIds) && req.body.questionIds.length ? new Set(req.body.questionIds) : null;
+  const qs = test.questions.filter(q => !only || only.has(q.id));
   const results = {};
-  const shorts = [];
-  for (const q of test.questions) {
+  const toAI = [];
+  for (const q of qs) {
     const a = answers[q.id];
     if (q.type === 'mc') results[q.id] = { correct: Number(a) === Number(q.answer), feedback: '' };
     else if (q.type === 'tf') results[q.id] = { correct: String(a) === String(q.answer), feedback: '' };
-    else shorts.push({ id: q.id, question: q.question, model: q.answer, rubric: q.explanation, student: String(a || '') });
+    else if (q.type === 'fill' && norm(a) && norm(a) === norm(q.answer)) results[q.id] = { correct: true, score: 1, feedback: 'Exactly right.' };
+    else if (!String(a ?? '').trim()) results[q.id] = { correct: false, score: 0, feedback: 'No answer given.' };
+    else toAI.push({ id: q.id, type: q.type, question: q.question, model: q.answer, rubric: q.explanation, student: String(a) });
   }
   try {
-    if (shorts.length) {
+    if (toAI.length) {
       const graded = await ai.completeJSON({
-        system: 'You are a fair, encouraging teacher grading short-answer test questions. Output ONLY JSON. For math, accept equivalent forms (3/4 = 0.75 = $\\\\frac{3}{4}$, unsimplified fractions if the question did not ask to simplify, different variable order) and ignore formatting differences.',
-        prompt: `Grade each student answer. Be fair: accept different wording if the meaning is right; blank or off-topic answers are wrong. Give a 0-1 score (1 = fully correct, 0.5 = partially correct) and one sentence of feedback.\n${JSON.stringify(shorts, null, 1)}\nReturn ONLY JSON: [{"id":"q3","score":1,"feedback":"..."}]`,
-        maxTokens: 2000, effort: 'low',
+        system: 'You are a fair, encouraging teacher grading student answers. Output ONLY JSON. For math, accept equivalent forms (3/4 = 0.75 = $\\\\frac{3}{4}$, unsimplified fractions if the question did not ask to simplify, different variable order) and ignore formatting differences.',
+        prompt: `Grade each student answer. Be fair: accept different wording if the meaning is right; for "fill" accept synonyms/plural/singular and equivalent numbers; for "explain" give partial credit for partially correct reasoning. Score 0-1 (1 = fully correct, 0.5 = partially correct, 0 = wrong) and one or two sentences of specific feedback that teaches.\n${JSON.stringify(toAI, null, 1)}\nReturn ONLY JSON: [{"id":"q3","score":1,"feedback":"..."}]`,
+        maxTokens: 3000, effort: 'low',
       });
-      for (const g of graded) results[g.id] = { correct: Number(g.score) >= 0.75, score: Number(g.score), feedback: g.feedback || '' };
-      for (const sh of shorts) if (!results[sh.id]) results[sh.id] = { correct: false, feedback: '' };
+      for (const g of graded) if (results[g.id] === undefined) results[g.id] = { correct: Number(g.score) >= 0.75, score: Math.max(0, Math.min(1, Number(g.score) || 0)), feedback: g.feedback || '' };
+      for (const t of toAI) if (!results[t.id]) results[t.id] = { correct: false, feedback: '' };
     }
-    const total = test.questions.length;
+    const total = qs.length;
     let score = 0;
-    for (const q of test.questions) { const r = results[q.id]; score += r.score !== undefined ? r.score : (r.correct ? 1 : 0); }
-    const attempt = { id: store.uid(), at: Date.now(), answers, results, score, total, percent: Math.round(100 * score / total) };
-    test.attempts.push(attempt); s.updatedAt = Date.now(); store.save(req.user.id);
+    for (const q of qs) { const r = results[q.id]; score += r.score !== undefined ? r.score : (r.correct ? 1 : 0); }
+    const attempt = { id: store.uid(), at: Date.now(), answers, results, score, total, percent: total ? Math.round(100 * score / total) : 0, subset: only ? [...only] : null, timeSpent: req.body.timeSpent || null, mode: req.body.mode || 'exam' };
+    if (!dryRun) { test.attempts.push(attempt); s.updatedAt = Date.now(); store.save(req.user.id); }
     res.json(attempt);
   } catch (e) { console.error('grade:', e.message); res.status(500).json({ error: e.message }); }
 });

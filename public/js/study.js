@@ -55,7 +55,7 @@ export async function studyView({ id }, q = {}) {
   const [s, evs] = await Promise.all([api('/study/' + id), loadEvents()]);
   const ev = evs.find(e => e.id === s.eventId);
   if (q.tab) tab = q.tab;
-  if (q.take) { const t = s.tests.find(t => t.id === q.take); if (t) { activeTest = { setId: s.id, test: t, answers: {}, attempt: null }; tab = 'test'; } }
+  if (q.take) { const t = s.tests.find(t => t.id === q.take); if (t) { let cfg = {}; try { cfg = JSON.parse(sessionStorage.getItem('dwb_take_cfg') || '{}'); } catch {} sessionStorage.removeItem('dwb_take_cfg'); startTest(s, t, cfg); tab = 'test'; } }
   const TABS = [['sheet', 'sheet', 'Study sheet'], ['online', 'globe', 'More online'], ['test', 'quiz', 'Practice tests'], ['cards', 'cards', 'Flashcards'], ['tutor', 'chat', 'Tutor']];
   main.innerHTML = `<div class="crumbs"><a href="#/study">Study</a> › <span>${esc(s.title)}</span></div>
     <div class="page-head"><div><h1>${esc(s.title)}</h1><div class="sub">${esc(s.subject || '')}${ev ? ` · ${fmtDate(ev.date)} · <b class="countdown ${daysUntil(ev.date) <= 3 ? 'urgent' : ''}">${countdown(ev.date)}</b>` : ''} · ${s.pageIds.length} notebook page${s.pageIds.length === 1 ? '' : 's'}</div></div>
@@ -111,25 +111,43 @@ async function generate(s, kind, btn, label) {
 }
 
 // --- practice tests
-let activeTest = null; // { test, answers, attempt }
+let activeTest = null; // { setId, test, answers, attempt, subset, mode:'exam'|'practice', checked:{}, flagged:Set, hints:Set, timer, timeLeft, startedAt }
+const TYPE_LABEL = { mc: 'Multiple choice', tf: 'True or false', short: 'Short answer', fill: 'Fill in the blank', explain: 'Explain / show your work' };
 export function testConfigHtml(s, opts = {}) {
-  return `<div class="card flat" style="margin:0 auto 14px;max-width:560px;text-align:left">
+  const pages = (opts.pages || []);
+  return `<div class="card flat test-cfg" style="margin:0 auto 14px;max-width:640px;text-align:left">
     <div class="field"><label>Test type</label><div class="test-styles">
-      <label class="tstyle ${opts.style !== 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="standard" ${opts.style !== 'remake' ? 'checked' : ''}><b>📝 Standard test</b><span>Multiple choice, true/false and short answers about the material</span></label>
-      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same page, new numbers</b><span>A copy of your page's problems with different numbers/examples — great for math &amp; worksheets</span></label></div></div>
-    <div class="field"><label>What's the test about? <span class="muted">(optional — helps the AI focus)</span></label><input type="text" id="tAbout" class="input" value="${esc(opts.about || s.topic || '')}" placeholder="e.g. adding fractions and repeating decimals, chapter 5 organelles…"></div>
-    <div class="row"><div class="field"><label>Questions</label><select id="tCount">${[5, 10, 15, 20, 30].map(n => `<option ${n === (opts.count || 10) ? 'selected' : ''}>${n}</option>`).join('')}</select></div><div class="field" id="diffField"><label>Difficulty</label><select id="tDiff"><option value="easy">Easy</option><option value="mixed" selected>Mixed</option><option value="hard">Hard</option></select></div></div>
-    <div class="field" id="typesField"><label>Question types</label><div class="btn-row"><label class="chip"><input type="checkbox" class="tType" value="mc" checked> Multiple choice</label><label class="chip"><input type="checkbox" class="tType" value="tf" checked> True / False</label><label class="chip"><input type="checkbox" class="tType" value="short" checked> Short answer</label></div></div></div>`;
+      <label class="tstyle ${opts.style !== 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="standard" ${opts.style !== 'remake' ? 'checked' : ''}><b>📝 Standard test</b><span>Pick the question types below</span></label>
+      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same page, new numbers</b><span>A copy of your page's problems with different numbers/examples</span></label></div></div>
+    <div class="field" id="typesField"><label>Question types</label><div class="btn-row">${Object.entries(TYPE_LABEL).map(([k, v]) => `<label class="chip"><input type="checkbox" class="tType" value="${k}" ${['mc', 'tf', 'short'].includes(k) ? 'checked' : ''}> ${v}</label>`).join('')}</div></div>
+    <div class="row"><div class="field"><label>How many questions <span class="muted" id="tCountLbl">(${opts.count || 10})</span></label><input type="range" id="tCount" min="1" max="50" value="${opts.count || 10}"></div>
+      <div class="field"><label>Difficulty <span class="muted" id="tDiffLbl">(medium)</span></label><input type="range" id="tDiff" min="1" max="5" value="3"></div></div>
+    <div class="field"><label>What's the test about? <span class="muted">(optional)</span></label><input type="text" id="tAbout" class="input" value="${esc(opts.about || s.topic || '')}" placeholder="e.g. adding fractions and repeating decimals, chapter 5 organelles…"></div>
+    <div class="field"><label>Your instructions to the AI <span class="muted">(optional — anything goes)</span></label><textarea id="tInstr" placeholder="e.g. make it like Mrs. K's tests · only vocab words · include 3 word problems · ask me to show my work · make question 1 easy and the last one really hard · use soccer examples…" style="min-height:64px">${esc(opts.instructions || '')}</textarea></div>
+    ${pages.length > 1 ? `<div class="field"><label>Pages to test on <span class="muted">(all if none picked)</span></label><div class="src-pages" style="max-height:140px">${pages.map(p => `<label><input type="checkbox" class="tPage" value="${p.id}"><span>p.${p.index} ${esc(p.title || '')}</span></label>`).join('')}</div></div>` : ''}
+    <div class="field"><label>How you'll take it</label><div class="test-styles">
+      <label class="tstyle on"><input type="radio" name="tMode" value="exam" checked><b>🎓 Exam mode</b><span>Answer everything, then get graded</span></label>
+      <label class="tstyle"><input type="radio" name="tMode" value="practice"><b>🧪 Practice mode</b><span>Check each answer as you go, with hints</span></label></div></div>
+    <div class="row"><div class="field"><label>Timer</label><select id="tTimer"><option value="0">No timer</option><option value="5">5 minutes</option><option value="10">10 minutes</option><option value="15">15 minutes</option><option value="20">20 minutes</option><option value="30">30 minutes</option><option value="45">45 minutes</option></select></div>
+      <div class="field"><label>Extras</label><div class="btn-row"><label class="chip"><input type="checkbox" id="tHints" checked> Hints available</label><label class="chip"><input type="checkbox" id="tShuffle"> Shuffle order</label></div></div></div>
+  </div>`;
 }
 export function wireTestConfig(root = document) {
-  const upd = () => { const remake = $('input[name=tStyle]:checked', root)?.value === 'remake'; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root), df = $('#diffField', root); if (tf) tf.style.display = remake ? 'none' : ''; if (df) df.style.display = remake ? 'none' : ''; };
-  $$('input[name=tStyle]', root).forEach(r => r.onchange = upd); upd();
+  const upd = () => { const remake = $('input[name=tStyle]:checked', root)?.value === 'remake'; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root); if (tf) tf.style.display = remake ? 'none' : ''; };
+  $$('input[name=tStyle], input[name=tMode]', root).forEach(r => r.onchange = upd); upd();
+  const c = $('#tCount', root), cl = $('#tCountLbl', root); if (c) c.oninput = () => { cl.textContent = '(' + c.value + ')'; };
+  const df = $('#tDiff', root), dl = $('#tDiffLbl', root); if (df) df.oninput = () => { dl.textContent = '(' + ['very easy', 'easy', 'medium', 'hard', 'very hard'][df.value - 1] + ')'; };
 }
 export function readTestConfig(root = document) {
   const style = $('input[name=tStyle]:checked', root)?.value || 'standard';
   const types = $$('.tType', root).filter(c => c.checked).map(c => c.value);
   if (style === 'standard' && !types.length) { toast('Pick at least one question type', 'err'); return null; }
-  return { style, types, count: +$('#tCount', root).value, difficulty: $('#tDiff', root)?.value || 'mixed', about: $('#tAbout', root)?.value.trim() || '' };
+  return { style, types, count: +$('#tCount', root).value, difficulty: +$('#tDiff', root).value, about: $('#tAbout', root)?.value.trim() || '', instructions: $('#tInstr', root)?.value.trim() || '', pageIds: $$('.tPage', root).filter(c => c.checked).map(c => c.value), hints: $('#tHints', root)?.checked !== false, shuffle: !!$('#tShuffle', root)?.checked, mode: $('input[name=tMode]:checked', root)?.value || 'exam', timerMin: +($('#tTimer', root)?.value || 0) };
+}
+function startTest(s, test, cfg = {}, subset = null) {
+  let order = (subset || test.questions.map(q => q.id));
+  if (cfg.shuffle) order = order.slice().sort(() => Math.random() - 0.5);
+  activeTest = { setId: s.id, test, answers: {}, attempt: null, subset, order, mode: cfg.mode || 'exam', checked: {}, flagged: new Set(), hints: new Set(), timerMin: cfg.timerMin || 0, timeLeft: (cfg.timerMin || 0) * 60, startedAt: Date.now(), timer: null };
 }
 // "Test on this page": create a study set from one page and generate a test right away.
 export async function testOnPage(page, nb) {
@@ -142,50 +160,83 @@ export async function testOnPage(page, nb) {
     try {
       const set = await api('/study', { body: { title: (page.title || 'Page ' + page.index) + ' — test', subject: nb.subject || '', topic: cfg.about, pageIds: [page.id] } });
       const t = await api(`/study/${set.id}/test`, { body: cfg });
+      sessionStorage.setItem('dwb_take_cfg', JSON.stringify(cfg));
       invalidate(); m.close(); go(`#/study/${set.id}?tab=test&take=${t.id}`);
     } catch (e) { toast(e.message, 'err'); busy($('#goTest', m.el), false); }
   };
 }
-function testTab(s, body) {
+async function testTab(s, body) {
   if (activeTest && activeTest.setId === s.id) return drawQuiz(s, body);
-  const cfg = testConfigHtml(s);
-  body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b> ${t.style === 'remake' ? '<span class="chip purple">worksheet · new numbers</span>' : ''}${t.description ? `<div class="small" style="margin:2px 0 4px;color:var(--ink-2)">${esc(t.description)}</div>` : ''}<div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}</div></div>`; }).join('')}</div>` : ''}
-    ${genBox({ emoji: '✅', title: s.tests.length ? 'Make another practice test' : 'Make a practice test', text: 'AI writes a real test on this material. You take it online and get graded instantly — including your written answers.', btn: 'Generate test', id: 'gen', extra: cfg })}`;
+  let pages = [];
+  if (s.pageIds?.length > 1) { try { const nbs = await loadNotebooks(); const seen = new Set(); for (const nb of nbs) { const full = await api('/notebooks/' + nb.id); for (const p of full.pages) if (s.pageIds.includes(p.id) && !seen.has(p.id)) { seen.add(p.id); pages.push(p); } } } catch {} }
+  const cfg = testConfigHtml(s, { pages });
+  body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b> ${t.style === 'remake' ? '<span class="chip purple">worksheet · new numbers</span>' : ''}${t.difficulty ? `<span class="chip">${['very easy', 'easy', 'medium', 'hard', 'very hard'][t.difficulty - 1]}</span>` : ''}${t.description ? `<div class="small" style="margin:2px 0 4px;color:var(--ink-2)">${esc(t.description)}</div>` : ''}<div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}" data-mode="exam">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button><button class="btn sm takeT" data-id="${t.id}" data-mode="practice">🧪 Practice</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}${last && last.results && Object.values(last.results).some(r => !r.correct) ? `<button class="btn sm retryT" data-id="${t.id}">↺ Retry missed</button>` : ''}<button class="btn sm ghost printT" data-id="${t.id}">${icon('print')} Print</button></div></div>`; }).join('')}</div>` : ''}
+    ${genBox({ emoji: '✅', title: s.tests.length ? 'Make another test' : 'Make a practice test', text: 'You\'re in charge: pick the type, difficulty, how many, and tell the AI exactly what you want. Take it as an exam or in practice mode with hints.', btn: 'Generate test', id: 'gen', extra: cfg })}`;
   wireTestConfig();
   $('#gen').onclick = async () => {
     const cfgv = readTestConfig(); if (!cfgv) return;
     busy($('#gen'), true, cfgv.style === 'remake' ? 'Rewriting your page with new numbers…' : 'Writing your test…');
-    try { const t = await api(`/study/${s.id}/test`, { body: cfgv }); s.tests.push(t); invalidate(); activeTest = { setId: s.id, test: t, answers: {}, attempt: null }; drawQuiz(s, body); }
+    try { const t = await api(`/study/${s.id}/test`, { body: cfgv }); s.tests.push(t); invalidate(); startTest(s, t, cfgv); drawQuiz(s, body); }
     catch (e) { toast(e.message, 'err'); busy($('#gen'), false); }
   };
-  $$('.takeT').forEach(b => b.onclick = () => { activeTest = { setId: s.id, test: s.tests.find(t => t.id === b.dataset.id), answers: {}, attempt: null }; drawQuiz(s, body); });
-  $$('.reviewT').forEach(b => b.onclick = () => { const t = s.tests.find(t => t.id === b.dataset.id); const a = t.attempts[t.attempts.length - 1]; activeTest = { setId: s.id, test: t, answers: a.answers, attempt: a }; drawQuiz(s, body); });
+  $$('.takeT').forEach(b => b.onclick = () => { const t = s.tests.find(t => t.id === b.dataset.id); startTest(s, t, { mode: b.dataset.mode }); drawQuiz(s, body); });
+  $$('.reviewT').forEach(b => b.onclick = () => { const t = s.tests.find(t => t.id === b.dataset.id); const a = t.attempts[t.attempts.length - 1]; startTest(s, t, {}, a.subset || null); activeTest.answers = a.answers; activeTest.attempt = a; drawQuiz(s, body); });
+  $$('.retryT').forEach(b => b.onclick = () => { const t = s.tests.find(t => t.id === b.dataset.id); const a = t.attempts[t.attempts.length - 1]; const missed = t.questions.filter(q => a.results?.[q.id] && !a.results[q.id].correct).map(q => q.id); startTest(s, t, { mode: 'exam' }, missed); drawQuiz(s, body); });
+  $$('.printT').forEach(b => b.onclick = () => { const t = s.tests.find(t => t.id === b.dataset.id); printHtml(t.title, `<h1>${esc(t.title)}</h1><p>${esc(t.description || '')}</p><ol>${t.questions.map(q => `<li style="margin-bottom:14px">${mdi(q.question)}${q.type === 'mc' ? '<ol type="A">' + q.choices.map(c => `<li>${mdi(c)}</li>`).join('') + '</ol>' : q.type === 'tf' ? '<div>☐ True &nbsp; ☐ False</div>' : '<div style="border-bottom:1px solid #999;height:34px"></div>'}</li>`).join('')}</ol><h2 style="page-break-before:always">Answer key</h2><ol>${t.questions.map(q => `<li>${q.type === 'mc' ? mdi(q.choices[q.answer]) : q.type === 'tf' ? (q.answer ? 'True' : 'False') : mdi(q.answer)}</li>`).join('')}</ol>`); });
   $$('.delT').forEach(b => b.onclick = async () => { if (await confirm('Delete this test?', 'Its attempts will be removed too.')) { await api.del(`/study/${s.id}/test/${b.dataset.id}`); s.tests = s.tests.filter(t => t.id !== b.dataset.id); invalidate(); testTab(s, body); } });
 }
+function fmtClock(sec) { sec = Math.max(0, sec); return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0'); }
 function drawQuiz(s, body) {
-  const { test, answers, attempt } = activeTest;
+  const A = activeTest; const { test, answers, attempt } = A;
   const L = 'ABCD';
-  body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px"><div><h2>${esc(test.title)}</h2>${test.description ? `<div style="color:var(--ink-2);margin:2px 0">${esc(test.description)}</div>` : ''}<div class="muted small">${test.questions.length} ${test.style === 'remake' ? 'problems · same as your page, new numbers' : 'questions'}${attempt ? ' · graded' : ''}</div></div><button class="btn sm" id="backT">${icon('chevL')} All tests</button></div>
-    ${attempt ? `<div class="card score-card" style="margin-bottom:16px"><div class="score-ring" style="--p:${attempt.percent}"><div>${attempt.percent}%</div></div><div style="font-family:var(--serif);font-size:20px">${attempt.percent >= 90 ? 'Outstanding! 🌟' : attempt.percent >= 75 ? 'Nice work! 👏' : attempt.percent >= 50 ? 'Getting there — review the misses 💪' : 'Keep studying — you’ve got this 📚'}</div><div class="muted small">${Math.round(attempt.score * 10) / 10} / ${attempt.total} points</div><div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="again">${icon('refresh')} Try again</button><button class="btn" id="newT">${icon('sparkle')} New test</button></div></div>` : ''}
-    <div id="qs">${test.questions.map((q, i) => { const r = attempt?.results?.[q.id]; const a = answers[q.id]; return `<div class="q" data-id="${q.id}"><div class="qn">Question ${i + 1} · ${q.type === 'mc' ? 'Multiple choice' : q.type === 'tf' ? 'True or false' : 'Short answer'}</div><div class="qt">${mdi(q.question)}</div>
-      ${q.type === 'mc' ? `<div class="choices">${q.choices.map((c, ci) => `<div class="choice ${a === ci ? 'sel' : ''} ${attempt ? (ci === Number(q.answer) ? 'right' : (a === ci ? 'wrong' : '')) : ''}" data-ci="${ci}"><span class="letter">${L[ci]}</span><span>${mdi(c)}</span></div>`).join('')}</div>`
-        : q.type === 'tf' ? `<div class="choices">${[true, false].map(v => `<div class="choice ${String(a) === String(v) ? 'sel' : ''} ${attempt ? (String(v) === String(q.answer) ? 'right' : (String(a) === String(v) ? 'wrong' : '')) : ''}" data-v="${v}"><span class="letter">${v ? 'T' : 'F'}</span><span>${v ? 'True' : 'False'}</span></div>`).join('')}</div>`
-        : `<textarea placeholder="Type your answer…" ${attempt ? 'disabled' : ''}>${esc(a || '')}</textarea>`}
-      ${attempt ? `<div class="fb ${r?.correct ? 'ok' : 'bad'}">${r?.correct ? '✅ Correct' : (r?.score === 0.5 ? '🟡 Partly right' : '❌ Not quite')}${q.type === 'short' ? ` — <b>Model answer:</b> ${mdi(q.answer)}` : (r?.correct ? '' : ` — <b>Answer:</b> ${q.type === 'mc' ? mdi(q.choices[q.answer]) : (q.answer ? 'True' : 'False')}`)}${r?.feedback ? `<div style="margin-top:4px">${mdi(r.feedback)}</div>` : ''}${q.explanation ? `<div style="margin-top:4px;opacity:.85">${mdi(q.explanation)}</div>` : ''}</div>` : ''}
+  const qs = A.order.map(id => test.questions.find(q => q.id === id)).filter(Boolean);
+  const answered = qs.filter(q => answers[q.id] !== undefined && answers[q.id] !== '').length;
+  const practice = A.mode === 'practice' && !attempt;
+  body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px"><div><h2>${esc(test.title)}</h2>${test.description ? `<div style="color:var(--ink-2);margin:2px 0">${esc(test.description)}</div>` : ''}<div class="muted small">${qs.length} ${test.style === 'remake' ? 'problems · same as your page, new numbers' : 'questions'}${A.subset ? ' · retrying the ones you missed' : ''}${practice ? ' · 🧪 practice mode' : attempt ? ' · graded' : ' · 🎓 exam mode'}</div></div><div class="btn-row">${A.timerMin && !attempt ? `<span class="chip ${A.timeLeft < 60 ? 'red' : 'blue'}" id="clock">⏱ ${fmtClock(A.timeLeft)}</span>` : ''}<button class="btn sm" id="backT">${icon('chevL')} All tests</button></div></div>
+    ${!attempt ? `<div class="progress" style="margin-bottom:14px"><i id="prog" style="width:${Math.round(100 * answered / qs.length)}%"></i></div>` : ''}
+    ${attempt ? `<div class="card score-card" style="margin-bottom:16px"><div class="score-ring" style="--p:${attempt.percent}"><div>${attempt.percent}%</div></div><div style="font-family:var(--serif);font-size:20px">${attempt.percent >= 90 ? 'Outstanding! 🌟' : attempt.percent >= 75 ? 'Nice work! 👏' : attempt.percent >= 50 ? 'Getting there — review the misses 💪' : 'Keep studying — you’ve got this 📚'}</div><div class="muted small">${Math.round(attempt.score * 10) / 10} / ${attempt.total} points${attempt.timeSpent ? ' · ' + fmtClock(Math.round(attempt.timeSpent / 1000)) : ''}</div><div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="again">${icon('refresh')} Try again</button>${Object.values(attempt.results || {}).some(r => !r.correct) ? `<button class="btn" id="retryMissed">↺ Retry missed only</button>` : ''}<button class="btn" id="practiceAgain">🧪 Practice mode</button><button class="btn" id="newT">${icon('sparkle')} New test</button></div></div>` : ''}
+    <div id="qs">${qs.map((q, i) => { const r = attempt?.results?.[q.id] || A.checked[q.id]; const a = answers[q.id]; const graded = !!r; return `<div class="q ${A.flagged.has(q.id) ? 'flagged' : ''}" data-id="${q.id}"><div style="display:flex;justify-content:space-between;align-items:center"><div class="qn">Question ${i + 1} · ${TYPE_LABEL[q.type] || q.type}</div><div class="btn-row">${!attempt ? `<button class="btn icon sm ghost flagQ" title="Flag for later">${A.flagged.has(q.id) ? '🚩' : '⚑'}</button>` : ''}${q.hint && !graded ? `<button class="btn sm ghost hintQ">💡 Hint</button>` : ''}</div></div><div class="qt">${mdi(q.question)}</div>${A.hints.has(q.id) && q.hint ? `<div class="hint-box">💡 ${mdi(q.hint)}</div>` : ''}
+      ${q.type === 'mc' ? `<div class="choices">${q.choices.map((c, ci) => `<div class="choice ${a === ci ? 'sel' : ''} ${graded ? (ci === Number(q.answer) ? 'right' : (a === ci ? 'wrong' : '')) : ''}" data-ci="${ci}"><span class="letter">${L[ci]}</span><span>${mdi(c)}</span></div>`).join('')}</div>`
+        : q.type === 'tf' ? `<div class="choices">${[true, false].map(v => `<div class="choice ${String(a) === String(v) ? 'sel' : ''} ${graded ? (String(v) === String(q.answer) ? 'right' : (String(a) === String(v) ? 'wrong' : '')) : ''}" data-v="${v}"><span class="letter">${v ? 'T' : 'F'}</span><span>${v ? 'True' : 'False'}</span></div>`).join('')}</div>`
+        : q.type === 'fill' ? `<input class="input fillin" placeholder="Type the missing word or number…" value="${esc(a || '')}" ${graded ? 'disabled' : ''}>`
+        : `<textarea placeholder="${q.type === 'explain' ? 'Explain your thinking / show your work…' : 'Type your answer…'}" ${graded ? 'disabled' : ''} style="${q.type === 'explain' ? 'min-height:110px' : ''}">${esc(a || '')}</textarea>`}
+      ${practice && !graded ? `<div class="btn-row" style="margin-top:8px"><button class="btn sm checkQ">${icon('check')} Check answer</button></div>` : ''}
+      ${graded ? `<div class="fb ${r?.correct ? 'ok' : 'bad'}">${r?.correct ? '✅ Correct' : (r?.score === 0.5 ? '🟡 Partly right' : '❌ Not quite')}${['short', 'fill', 'explain'].includes(q.type) ? ` — <b>Model answer:</b> ${mdi(q.answer)}` : (r?.correct ? '' : ` — <b>Answer:</b> ${q.type === 'mc' ? mdi(q.choices[q.answer]) : (q.answer ? 'True' : 'False')}`)}${r?.feedback ? `<div style="margin-top:4px">${mdi(r.feedback)}</div>` : ''}${q.explanation ? `<div style="margin-top:4px;opacity:.85">${mdi(q.explanation)}</div>` : ''}</div>` : ''}
     </div>`; }).join('')}</div>
-    ${!attempt ? `<div style="position:sticky;bottom:12px;text-align:center;margin-top:8px"><button class="btn primary lg" id="submit">${icon('check')} Submit test</button></div>` : ''}`;
-  $('#backT').onclick = () => { activeTest = null; testTab(s, body); };
-  if (attempt) { $('#again').onclick = () => { activeTest = { setId: s.id, test, answers: {}, attempt: null }; drawQuiz(s, body); }; $('#newT').onclick = () => { activeTest = null; testTab(s, body); $('#gen')?.scrollIntoView({ behavior: 'smooth' }); }; return; }
+    ${!attempt ? `<div style="position:sticky;bottom:12px;text-align:center;margin-top:8px"><button class="btn primary lg" id="submit">${icon('check')} ${practice ? 'Finish & see score' : 'Submit test'}</button>${A.flagged.size ? `<div class="small muted" style="margin-top:6px">${A.flagged.size} flagged</div>` : ''}</div>` : ''}`;
+  $('#backT').onclick = () => { clearInterval(A.timer); activeTest = null; testTab(s, body); };
+  if (attempt) {
+    $('#again').onclick = () => { startTest(s, test, { mode: 'exam' }); drawQuiz(s, body); };
+    $('#newT').onclick = () => { activeTest = null; testTab(s, body).then?.(() => $('#gen')?.scrollIntoView({ behavior: 'smooth' })); };
+    $('#practiceAgain').onclick = () => { startTest(s, test, { mode: 'practice' }); drawQuiz(s, body); };
+    const rm = $('#retryMissed'); if (rm) rm.onclick = () => { const missed = qs.filter(q => attempt.results?.[q.id] && !attempt.results[q.id].correct).map(q => q.id); startTest(s, test, { mode: 'exam' }, missed); drawQuiz(s, body); };
+    return;
+  }
+  const upProg = () => { const n = qs.filter(q => answers[q.id] !== undefined && answers[q.id] !== '').length; const p = $('#prog'); if (p) p.style.width = Math.round(100 * n / qs.length) + '%'; };
   $$('.q').forEach(qel => {
-    const id = qel.dataset.id;
-    $$('.choice', qel).forEach(c => c.onclick = () => { $$('.choice', qel).forEach(x => x.classList.remove('sel')); c.classList.add('sel'); answers[id] = c.dataset.ci !== undefined ? +c.dataset.ci : c.dataset.v === 'true'; });
-    const ta = $('textarea', qel); if (ta) ta.oninput = () => { answers[id] = ta.value; };
+    const id = qel.dataset.id; const q = test.questions.find(x => x.id === id);
+    if (A.checked[id]) return;
+    $$('.choice', qel).forEach(c => c.onclick = () => { $$('.choice', qel).forEach(x => x.classList.remove('sel')); c.classList.add('sel'); answers[id] = c.dataset.ci !== undefined ? +c.dataset.ci : c.dataset.v === 'true'; upProg(); });
+    const ta = $('textarea, input.fillin', qel); if (ta) ta.oninput = () => { answers[id] = ta.value; upProg(); };
+    const fl = $('.flagQ', qel); if (fl) fl.onclick = () => { A.flagged.has(id) ? A.flagged.delete(id) : A.flagged.add(id); drawQuiz(s, body); qel.scrollIntoView({ block: 'center' }); };
+    const hb = $('.hintQ', qel); if (hb) hb.onclick = () => { A.hints.add(id); const y = window.scrollY; drawQuiz(s, body); window.scrollTo(0, y); };
+    const ck = $('.checkQ', qel); if (ck) ck.onclick = async () => {
+      if (answers[id] === undefined || answers[id] === '') return toast('Answer first, then check', 'err');
+      busy(ck, true, 'Checking…');
+      try { const r = await api(`/study/${s.id}/test/${test.id}/grade`, { body: { answers: { [id]: answers[id] }, questionIds: [id], dryRun: true } }); A.checked[id] = r.results[id]; const y = window.scrollY; drawQuiz(s, body); window.scrollTo(0, y); }
+      catch (e) { toast(e.message, 'err'); busy(ck, false); }
+    };
   });
+  // timer
+  if (A.timerMin && !A.timer) {
+    A.timer = setInterval(() => { A.timeLeft--; const c = $('#clock'); if (c) { c.textContent = '⏱ ' + fmtClock(A.timeLeft); c.classList.toggle('red', A.timeLeft < 60); } if (A.timeLeft <= 0) { clearInterval(A.timer); A.timer = null; toast('Time’s up — submitting', 'err'); $('#submit')?.click(); } }, 1000);
+  }
   $('#submit').onclick = async () => {
-    const missing = test.questions.filter(q => answers[q.id] === undefined || answers[q.id] === '').length;
-    if (missing && !(await confirm(`${missing} unanswered`, 'Submit anyway? Blank answers count as wrong.', { danger: false, ok: 'Submit' }))) return;
+    const missing = qs.filter(q => answers[q.id] === undefined || answers[q.id] === '').length;
+    if (missing && A.timeLeft > 0 && !(await confirm(`${missing} unanswered`, 'Submit anyway? Blank answers count as wrong.', { danger: false, ok: 'Submit' }))) return;
+    clearInterval(A.timer); A.timer = null;
     busy($('#submit'), true, 'Grading…');
-    try { const a = await api(`/study/${s.id}/test/${test.id}/grade`, { body: { answers } }); test.attempts.push(a); activeTest.attempt = a; invalidate(); drawQuiz(s, body); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+    try { const a = await api(`/study/${s.id}/test/${test.id}/grade`, { body: { answers, questionIds: A.subset || undefined, mode: A.mode, timeSpent: Date.now() - A.startedAt } }); test.attempts.push(a); A.attempt = a; invalidate(); drawQuiz(s, body); window.scrollTo({ top: 0, behavior: 'smooth' }); }
     catch (e) { toast(e.message, 'err'); busy($('#submit'), false); }
   };
 }

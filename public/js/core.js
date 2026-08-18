@@ -105,15 +105,16 @@ const I = {
   download: '<path d="M12 4v11M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/>',
   print: '<path d="M7 8V3h10v5M5 8h14a2 2 0 0 1 2 2v6h-4v4H7v-4H3v-6a2 2 0 0 1 2-2z"/>',
 };
-// Brand mark: spiral notebook with folded corner + AI sparkle
-export const logoSvg = (size = 36) => `<svg class="logo-svg" style="width:${size}px;height:${Math.round(size * 1.12)}px" viewBox="0 0 36 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <defs><linearGradient id="lg1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b6cff"/><stop offset="1" stop-color="#7a4fd6"/></linearGradient><linearGradient id="lg2" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e9edff"/></linearGradient><filter id="lsh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="1.6" flood-color="#1c2130" flood-opacity=".22"/></filter></defs>
-  <g filter="url(#lsh)"><path d="M6 4a3 3 0 0 1 3-3h17.5L34 8.5V35a3 3 0 0 1-3 3H9a3 3 0 0 1-3-3z" fill="url(#lg1)"/><path d="M26.5 1V6a2.5 2.5 0 0 0 2.5 2.5h5z" fill="#fff" fill-opacity=".85"/></g>
-  <rect x="9.5" y="7" width="20" height="26" rx="2" fill="url(#lg2)"/>
-  <g stroke="#c8d3f5" stroke-width="1.2" stroke-linecap="round"><path d="M13 14h13M13 19h13M13 24h9"/></g>
-  <path d="M13 29h5" stroke="#e5604b" stroke-width="1.6" stroke-linecap="round"/>
-  <g fill="#fff" stroke="#2f4fb8" stroke-width=".9"><rect x="4" y="9" width="5" height="2.6" rx="1.3"/><rect x="4" y="16" width="5" height="2.6" rx="1.3"/><rect x="4" y="23" width="5" height="2.6" rx="1.3"/><rect x="4" y="30" width="5" height="2.6" rx="1.3"/></g>
-  <path d="M30 24l1.1 2.9L34 28l-2.9 1.1L30 32l-1.1-2.9L26 28l2.9-1.1z" fill="#ffcf4d" stroke="#e0a400" stroke-width=".6" stroke-linejoin="round"/>
+// Brand mark: app-icon tile with a clean white notebook page and a small gold spark.
+export const logoSvg = (size = 36) => `<svg class="logo-svg" style="width:${size}px;height:${size}px" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <defs><linearGradient id="wbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#4f6cff"/><stop offset="1" stop-color="#7b4dff"/></linearGradient></defs>
+  <rect width="40" height="40" rx="11" fill="url(#wbg)"/>
+  <g transform="rotate(-6 20 21)">
+    <rect x="11" y="9" width="18" height="23" rx="3" fill="#fff"/>
+    <path d="M23.5 9v4.5a2 2 0 0 0 2 2H29" fill="#dfe6ff"/>
+    <path d="M14.5 17.5h8M14.5 22h11M14.5 26.5h7" stroke="#8fa2ff" stroke-width="1.8" stroke-linecap="round"/>
+  </g>
+  <path d="M31 6.5l.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z" fill="#ffd54a"/>
 </svg>`;
 export const icon = (n, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${I[n] || ''}</svg>`;
 
