@@ -46,7 +46,9 @@ const NOT_CONFIGURED = 'AI is not set up on this server yet — an ANTHROPIC_API
 
 // OpenAI-compatible: pick text + vision models (env override, else from the endpoint's advertised capabilities, else defaults)
 const OA = { text: process.env.AI_TEXT_MODEL || null, vision: process.env.AI_VISION_MODEL || null, ready: null };
-const TEXT_PREF = ['deepseek-ai/DeepSeek-V4-Flash', 'openai/gpt-oss-120b', 'Qwen/Qwen3', 'google/gemma-4', 'poolside/Laguna', 'cyankiwi/Ornith'];
+// Benchmarked 2026-08-18 on this platform: gpt-oss-120b (largest, best structure/reasoning) > DeepSeek-V4-Flash > Laguna; Qwen3.8 over-thinks and returns empty.
+const TEXT_PREF = ['openai/gpt-oss-120b', 'deepseek-ai/DeepSeek-V4-Flash', 'poolside/Laguna', 'google/gemma-4', 'cyankiwi/Ornith', 'Qwen/Qwen3'];
+// Vision benchmark on handwritten math: Ornith-35B perfect + fastest (3.9s), Gemma-4 perfect (6.7s), Qwen slower and misread a repeating decimal.
 const VISION_PREF = ['cyankiwi/Ornith', 'google/gemma-4', 'Qwen/Qwen3'];
 async function oaReady() {
   if (BACKEND !== 'openai') return;

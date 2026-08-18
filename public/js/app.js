@@ -27,36 +27,41 @@ export const nbCover = (nb, extra = '') => `<div class="nb-cover color-${esc(nb.
 // ---------- auth ----------
 function authView(mode = 'login') {
   const login = mode === 'login';
+  let last = null; try { last = JSON.parse(localStorage.getItem('dwb_last_user') || 'null'); } catch {}
+  const initials = (n) => (n || '?').split(/\s+/).map(w => w[0]).join('').slice(0, 2).toUpperCase();
   render(`<div class="auth">
     <aside class="auth-side">
       <div class="auth-side-inner">
         <a class="brand" href="#/" style="text-decoration:none;color:inherit;padding:0"><div class="logo"></div><div class="name">WorkBook<small>Digital Notebook</small></div></a>
         <h2 class="auth-tag">Your notebooks, digitized.<br>Your tests, handled.</h2>
-        <ul class="auth-feats">
-          <li>${icon('camera')}<div><b>Scan any notebook page</b><span>AI finds the edges, straightens it and keeps your pen colors</span></div></li>
-          <li>${icon('sparkle')}<div><b>Instant digital copy</b><span>Handwriting → clean notes, key points and vocab</span></div></li>
-          <li>${icon('calendar')}<div><b>Planner that studies with you</b><span>Add a test — get a study sheet, practice test and flashcards</span></div></li>
-        </ul>
+        <p class="auth-lead">Point your camera at a page. WorkBook straightens it, keeps your pen colors, reads your handwriting into clean notes, and turns your planner's next test into a study sheet, practice test and flashcards.</p>
+        <ol class="auth-steps">
+          <li><span>1</span><div><b>Scan</b>Camera or photo — AI finds the page edges</div></li>
+          <li><span>2</span><div><b>Read</b>Handwriting → notes, math, key points, vocab</div></li>
+          <li><span>3</span><div><b>Study</b>Sheets · practice tests · flashcards · tutor</div></li>
+        </ol>
         <div class="auth-mock">
-          <div class="mock-page paper holes"><div class="hand" style="font-size:20px;line-height:28px;color:#1a2a6b">Ch. 5 – The Cell<br>• Nucleus → holds DNA<br>• <span style="color:#c0392b">Mitochondria</span> → makes ATP<br>• Chloroplast → <span style="color:#1e8f4e">plants only</span></div></div>
+          <div class="mock-page paper holes"><div class="scanline"></div><div class="hand" style="font-size:20px;line-height:28px;color:#1a2a6b">Ch. 5 – The Cell<br>• Nucleus → holds DNA<br>• <span style="color:#c0392b">Mitochondria</span> → makes ATP<br>• Chloroplast → <span style="color:#1e8f4e">plants only</span><br>• Area = <span style="color:#7a4fd6">½ · b · h</span></div><div class="mock-badge">${icon('sparkle')} AI read this page</div></div>
           <div class="mock-card mock-test">${icon('zap')}<div><b>Ch. 5 Cell Test</b><span>Friday · in 3 days</span></div><span class="chip red">Study</span></div>
           <div class="mock-card mock-fc"><span class="lab">Flashcard</span><b>What does the mitochondria do?</b><span class="muted small">tap to flip</span></div>
           <div class="mock-card mock-score"><div class="score-ring" style="--p:92;width:54px;height:54px"><div style="width:40px;height:40px;font-size:13px">92%</div></div><div><b>Practice test</b><span>6 / 6 graded by AI</span></div></div>
         </div>
       </div>
-      <div class="auth-foot">Made for students · Works on phone & laptop</div>
+      <div class="auth-foot"><span>📷 Phone & laptop</span><span>🎨 Keeps your pen colors</span><span>∑ Math & fractions</span><span>☁️ Synced to your account</span></div>
     </aside>
     <main class="auth-main">
       <div class="auth-card">
-        <div class="brand auth-brand-sm" style="padding:0 0 10px"><div class="logo"></div><div class="name">WorkBook<small>Digital Notebook</small></div></div>
-        <h1>${login ? 'Welcome back' : 'Create your account'}</h1>
-        <p class="muted" style="margin:6px 0 22px">${login ? 'Log in to open your notebooks and planner.' : 'Free to use — set up in 10 seconds.'}</p>
+        <div class="auth-mobile-hero"><div class="brand" style="padding:0"><div class="logo"></div><div class="name">WorkBook<small>Digital Notebook</small></div></div><div class="chips" style="margin-top:10px"><span class="chip blue">📷 Scan</span><span class="chip purple">✨ AI notes</span><span class="chip amber">📅 Planner</span><span class="chip green">🎓 Study</span></div></div>
+        ${login && last?.username ? `<div class="last-user"><div class="avatar">${esc(initials(last.name || last.username))}</div><div><b>Welcome back, ${esc((last.name || last.username).split(' ')[0])}</b><span class="muted small">Signing in as @${esc(last.username)} · <a href="#" id="notYou">not you?</a></span></div></div>` : `<h1>${login ? 'Welcome back' : 'Create your account'}</h1>`}
+        <p class="muted" style="margin:6px 0 20px">${login ? 'Log in to open your notebooks, planner and study sets.' : 'Free to use — set up in 10 seconds. Your notes sync to your account.'}</p>
         <form id="authForm" novalidate>
           ${login ? '' : `<div class="field"><label for="f-name">Your name</label><input id="f-name" type="text" name="name" placeholder="What should we call you?" autocomplete="name" required></div>`}
-          <div class="field"><label for="f-user">Username</label><input id="f-user" type="text" name="username" placeholder="e.g. colton" autocomplete="username" autocapitalize="off" spellcheck="false" required></div>
+          <div class="field ${login && last?.username ? 'hidden' : ''}" id="userField"><label for="f-user">Username</label><input id="f-user" type="text" name="username" placeholder="e.g. colton" autocomplete="username" autocapitalize="off" spellcheck="false" value="${login && last?.username ? esc(last.username) : ''}" required></div>
           <div class="field"><div style="display:flex;justify-content:space-between;align-items:center"><label for="f-pass">Password</label>${login ? '<a href="#" class="small" id="forgot" style="text-decoration:none">Forgot password?</a>' : '<span class="help">At least 4 characters</span>'}</div>
-            <div class="pw-wrap"><input id="f-pass" type="password" name="password" placeholder="${login ? 'Your password' : 'Choose a password'}" autocomplete="${login ? 'current-password' : 'new-password'}" required><button type="button" class="pw-eye" id="pwEye" title="Show password">${icon('eye')}</button></div></div>
-          ${login ? '<label class="remember"><input type="checkbox" checked disabled> Keep me logged in on this device</label>' : ''}
+            <div class="pw-wrap"><input id="f-pass" type="password" name="password" placeholder="${login ? 'Your password' : 'Choose a password'}" autocomplete="${login ? 'current-password' : 'new-password'}" required><button type="button" class="pw-eye" id="pwEye" title="Show password">${icon('eye')}</button></div>
+            <div class="caps hidden" id="caps">⇪ Caps Lock is on</div>
+            ${login ? '' : '<div class="pw-meter" id="pwMeter"><i></i><i></i><i></i><i></i></div>'}</div>
+          <label class="remember"><input type="checkbox" name="remember" id="remember" checked> Keep me logged in on this device <span class="muted">(60 days, renews as you use it)</span></label>
           <div class="error" id="authErr" role="alert"></div>
           <button class="btn primary lg block" style="margin-top:6px" type="submit">${login ? 'Log in' : 'Create account'} ${icon('chevR')}</button>
         </form>
@@ -67,11 +72,16 @@ function authView(mode = 'login') {
   </div>`);
   const form = $('#authForm');
   $('#pwEye').onclick = () => { const i = $('#f-pass'); i.type = i.type === 'password' ? 'text' : 'password'; };
-  const forgot = $('#forgot'); if (forgot) forgot.onclick = (e) => { e.preventDefault(); toast('Password reset comes with cloud accounts — for now, make a new account or ask Colton 🙂'); };
+  const forgot = $('#forgot'); if (forgot) forgot.onclick = (e) => { e.preventDefault(); toast('Password reset comes with email accounts — for now, make a new account or ask Colton 🙂'); };
+  const notYou = $('#notYou'); if (notYou) notYou.onclick = (e) => { e.preventDefault(); localStorage.removeItem('dwb_last_user'); authView('login'); };
+  const pass = $('#f-pass');
+  pass.addEventListener('keyup', (e) => { const on = e.getModifierState && e.getModifierState('CapsLock'); $('#caps').classList.toggle('hidden', !on); });
+  const meter = $('#pwMeter'); if (meter) pass.addEventListener('input', () => { const v = pass.value; let sc = 0; if (v.length >= 4) sc++; if (v.length >= 8) sc++; if (/[A-Z]/.test(v) && /[a-z]/.test(v)) sc++; if (/\d/.test(v) || /[^\w]/.test(v)) sc++; meter.dataset.score = sc; });
+  setTimeout(() => (login && last?.username ? pass : $('#f-user') || pass).focus(), 60);
   form.onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(form); const btn = $('button[type=submit]', form); const err = $('#authErr');
-    const d = Object.fromEntries(f);
+    const d = Object.fromEntries(f); d.remember = $('#remember').checked;
     if (!d.username?.trim()) return err.textContent = 'Enter your username.';
     if (!d.password) return err.textContent = 'Enter your password.';
     if (!login && d.password.length < 4) return err.textContent = 'Password must be at least 4 characters.';
@@ -79,8 +89,10 @@ function authView(mode = 'login') {
     busy(btn, true, login ? 'Logging in…' : 'Creating your account…');
     try {
       const r = await api('/auth/' + mode, { body: d });
-      state.user = r.user; invalidate(); go('#/');
-    } catch (ex) { err.textContent = ex.message; busy(btn, false); form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake'); }
+      state.user = r.user; invalidate();
+      if (d.remember) localStorage.setItem('dwb_last_user', JSON.stringify({ username: r.user.username, name: r.user.name })); else localStorage.removeItem('dwb_last_user');
+      go('#/');
+    } catch (ex) { err.textContent = ex.message; busy(btn, false); form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake'); if (login && last?.username) { $('#userField').classList.remove('hidden'); } }
   };
 }
 
@@ -321,7 +333,7 @@ async function settingsView() {
     <div class="grid cols-2"><div class="card"><h3>Profile</h3><div class="field"><label>Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label>Username</label><input type="text" value="${esc(state.user.username)}" disabled></div><button class="btn primary" id="saveP">Save</button></div>
     <div class="card"><h3>AI</h3><p class="small muted">Scanning, transcription, study sheets, tests and flashcards are AI-powered.<br>Backend: <b>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')}</b> · Model: <b>${esc(state.ai?.model || '')}</b>${state.ai?.webSearch === false ? '<br>Live web search: not available on this backend (“More online” uses trusted search links).' : ''}</p><h3 style="margin-top:16px">Account</h3><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>`;
   $('#saveP').onclick = async () => { const r = await api.patch('/me', { name: $('#sName').value }); state.user = r.user; toast('Saved', 'ok'); };
-  $('#logout').onclick = async () => { await api('/auth/logout', { body: {} }); state.user = null; invalidate(); go('#/login'); };
+  $('#logout').onclick = async () => { await api('/auth/logout', { body: {} }); state.user = null; invalidate(); localStorage.removeItem('dwb_last_user'); go('#/login'); };
 }
 
 // ---------- routes ----------

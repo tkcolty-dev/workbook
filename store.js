@@ -98,7 +98,8 @@ async function init() {
   users = (await backend.loadDocs('users'))[0]?.value || [];
   sessions = (await backend.loadDocs('sessions'))[0]?.value || {};
   for (const { key, value } of await backend.loadDocs('u:')) { value.notebooks ||= []; value.pages ||= []; value.events ||= []; value.study ||= []; dbs.set(key.slice(2), value); }
-  console.log(`Storage: ${backend.name} (${users.length} users, ${dbs.size} user dbs)`);
+  const pruned = sessionsApi.prune();
+  console.log(`Storage: ${backend.name} (${users.length} users, ${dbs.size} user dbs${pruned ? ', pruned ' + pruned + ' old sessions' : ''})`);
   return backend.name;
 }
 
@@ -116,10 +117,13 @@ const usersApi = {
   update: (u, patch) => { Object.assign(u, patch); saveUsers(); },
   public: (u) => ({ id: u.id, username: u.username, name: u.name, createdAt: u.createdAt, settings: u.settings || {} }),
 };
+const SESSION_IDLE_MS = 90 * 24 * 3600 * 1000;
 const sessionsApi = {
-  create: (userId) => { const t = crypto.randomBytes(32).toString('hex'); sessions[t] = { userId, createdAt: Date.now() }; saveSessions(); return t; },
-  get: (t) => sessions[t],
+  create: (userId, remember = true) => { const t = crypto.randomBytes(32).toString('hex'); sessions[t] = { userId, remember, createdAt: Date.now(), lastSeen: Date.now() }; saveSessions(); return t; },
+  get: (t) => { const s = sessions[t]; if (!s) return null; if (Date.now() - (s.lastSeen || s.createdAt) > SESSION_IDLE_MS) { delete sessions[t]; saveSessions(); return null; } return s; },
+  touch: (t) => { if (sessions[t]) { sessions[t].lastSeen = Date.now(); saveSessions(); } },
   destroy: (t) => { delete sessions[t]; saveSessions(); },
+  prune: () => { let n = 0; for (const [t, s] of Object.entries(sessions)) if (Date.now() - (s.lastSeen || s.createdAt) > SESSION_IDLE_MS) { delete sessions[t]; n++; } if (n) saveSessions(); return n; },
 };
 
 // ---------- per-user db ----------

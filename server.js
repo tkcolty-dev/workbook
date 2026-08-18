@@ -28,16 +28,27 @@ function parseCookies(req) {
   (req.headers.cookie || '').split(';').forEach(c => { const i = c.indexOf('='); if (i > 0) out[c.slice(0, i).trim()] = decodeURIComponent(c.slice(i + 1).trim()); });
   return out;
 }
+// Sessions: "keep me logged in" = 60-day cookie that slides forward every time you use the app;
+// unchecked = browser-session cookie. Server-side sessions expire after 90 days without use.
+const REMEMBER_DAYS = 60;
+const cookieStr = (token, req, remember) => `dwb_sid=${token}; Path=/; HttpOnly; SameSite=Lax${remember ? `; Max-Age=${60 * 60 * 24 * REMEMBER_DAYS}` : ''}${req.secure ? '; Secure' : ''}`;
 app.use((req, res, next) => {
   const sid = parseCookies(req).dwb_sid;
   const s = sid && store.sessions.get(sid);
   req.user = s ? store.users.byId(s.userId) : null;
   req.sid = sid;
+  if (s && req.user) {
+    // slide the expiry: refresh cookie + lastSeen at most once a day
+    if (!s.lastSeen || Date.now() - s.lastSeen > 24 * 3600 * 1000) {
+      store.sessions.touch(sid);
+      if (s.remember !== false) res.setHeader('Set-Cookie', cookieStr(sid, req, true));
+    }
+  }
   next();
 });
 const auth = (req, res, next) => req.user ? next() : res.status(401).json({ error: 'Please log in' });
 app.set('trust proxy', 1);
-const setSession = (res, token) => res.setHeader('Set-Cookie', `dwb_sid=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 365}${res.req.secure ? '; Secure' : ''}`);
+const setSession = (res, token, remember = true) => res.setHeader('Set-Cookie', cookieStr(token, res.req, remember));
 
 app.get('/api/me', (req, res) => res.json({ user: req.user ? store.users.public(req.user) : null, ai: { mode: ai.BACKEND, model: ai.modelLabel(), available: ai.AVAILABLE, webSearch: ai.HAS_WEB_SEARCH }, storage: store.backendName() }));
 
@@ -47,14 +58,16 @@ app.post('/api/auth/register', (req, res) => {
   if (!password || password.length < 4) return res.status(400).json({ error: 'Password must be at least 4 characters' });
   if (store.users.find(username)) return res.status(409).json({ error: 'That username is taken' });
   const u = store.users.create({ username, password, name });
-  setSession(res, store.sessions.create(u.id));
+  const remember = req.body.remember !== false;
+  setSession(res, store.sessions.create(u.id, remember), remember);
   res.json({ user: store.users.public(u) });
 });
 app.post('/api/auth/login', (req, res) => {
   const { username, password } = req.body || {};
   const u = username && store.users.find(username);
   if (!u || !store.users.verify(u, password || '')) return res.status(401).json({ error: 'Wrong username or password' });
-  setSession(res, store.sessions.create(u.id));
+  const remember = req.body.remember !== false;
+  setSession(res, store.sessions.create(u.id, remember), remember);
   res.json({ user: store.users.public(u) });
 });
 app.post('/api/auth/logout', (req, res) => { if (req.sid) store.sessions.destroy(req.sid); res.setHeader('Set-Cookie', 'dwb_sid=; Path=/; Max-Age=0'); res.json({ ok: true }); });

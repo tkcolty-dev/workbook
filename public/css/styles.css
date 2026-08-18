@@ -229,17 +229,23 @@ h3 svg { margin-right: 2px; }
 
 /* ---------- auth ---------- */
 .auth { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); background: #fff; }
-.auth-side { position: relative; background: radial-gradient(1200px 600px at -10% -10%, #dfe7ff 0%, transparent 60%), radial-gradient(900px 500px at 110% 110%, #ffe9d6 0%, transparent 60%), #f7f8fc; padding: 44px 48px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; border-right: 1px solid var(--line); }
-.auth-side-inner { max-width: 520px; }
-.auth-tag { font-family: var(--serif); font-size: 34px; line-height: 1.15; font-weight: 600; margin: 34px 0 22px; letter-spacing: -.01em; }
-.auth-feats { list-style: none; margin: 0 0 30px; padding: 0; display: grid; gap: 14px; }
-.auth-feats li { display: flex; gap: 12px; align-items: flex-start; }
-.auth-feats li svg { width: 34px; height: 34px; padding: 7px; border-radius: 10px; background: #fff; color: var(--accent); box-shadow: var(--shadow); flex-shrink: 0; }
-.auth-feats b { display: block; font-size: 15px; }
-.auth-feats span { font-size: 13px; color: var(--ink-3); }
+.auth-side { position: relative; background: radial-gradient(1200px 600px at -10% -10%, #dfe7ff 0%, transparent 60%), radial-gradient(900px 500px at 110% 110%, #ffe9d6 0%, transparent 60%), radial-gradient(circle at 1px 1px, #dcdff0 1px, transparent 1.5px) 0 0/22px 22px, #f7f8fc; padding: 44px 48px 28px; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; border-right: 1px solid var(--line); }
+.auth-side-inner { max-width: 540px; }
+.auth-tag { font-family: var(--serif); font-size: 34px; line-height: 1.15; font-weight: 600; margin: 30px 0 12px; letter-spacing: -.01em; }
+.auth-lead { color: var(--ink-2); font-size: 15px; line-height: 1.55; margin: 0 0 20px; max-width: 480px; }
+.auth-steps { list-style: none; margin: 0 0 26px; padding: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.auth-steps li { display: flex; gap: 10px; align-items: flex-start; background: rgba(255,255,255,.75); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.auth-steps li span { width: 24px; height: 24px; border-radius: 50%; background: var(--accent); color: #fff; font-weight: 700; font-size: 12px; display: grid; place-items: center; flex-shrink: 0; }
+.auth-steps li b { display: block; font-size: 13px; }
+.auth-steps li div { font-size: 12px; color: var(--ink-3); line-height: 1.35; }
 .auth-mock { position: relative; height: 300px; }
 .auth-mock .mock-page { position: absolute; left: 0; top: 10px; width: 300px; height: 250px; transform: rotate(-4deg); padding: 22px 16px 16px 44px; overflow: hidden; }
 .auth-mock .mock-page::before { left: 30px; }
+.mock-page .scanline { position: absolute; left: 0; right: 0; top: 0; height: 3px; background: linear-gradient(90deg, transparent, var(--accent), transparent); box-shadow: 0 0 14px 3px rgba(47,91,234,.35); animation: scan 3.6s ease-in-out infinite; }
+@keyframes scan { 0% { top: 0; opacity: 0 } 8% { opacity: 1 } 48% { top: calc(100% - 3px); opacity: 1 } 56% { opacity: 0 } 100% { top: 0; opacity: 0 } }
+.mock-badge { position: absolute; right: 10px; bottom: 10px; font-size: 11px; font-weight: 700; color: var(--purple); background: var(--purple-soft); border-radius: 999px; padding: 3px 8px; display: inline-flex; gap: 4px; align-items: center; animation: badgein 3.6s ease-in-out infinite; }
+.mock-badge svg { width: 12px; height: 12px; }
+@keyframes badgein { 0%, 50% { opacity: 0; transform: translateY(4px) } 62%, 92% { opacity: 1; transform: none } 100% { opacity: 0 } }
 .mock-card { position: absolute; background: #fff; border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow-lg); padding: 12px 14px; display: flex; gap: 10px; align-items: center; font-size: 13px; }
 .mock-card b { display: block; font-size: 14px; } .mock-card span { color: var(--ink-3); font-size: 12px; }
 .mock-card svg { width: 30px; height: 30px; padding: 6px; border-radius: 8px; background: var(--red-soft); color: var(--red); }
@@ -248,22 +254,33 @@ h3 svg { margin-right: 2px; }
 .mock-fc .lab { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 700; }
 .mock-score { left: 200px; top: 218px; animation: floaty 8s ease-in-out infinite; }
 @keyframes floaty { 50% { transform: translateY(-6px); } }
-.auth-foot { font-size: 12px; color: var(--ink-3); }
+.auth-foot { font-size: 12px; color: var(--ink-3); display: flex; gap: 14px; flex-wrap: wrap; }
 .auth-main { display: grid; place-items: center; padding: 40px 24px; }
 .auth-card { width: 100%; max-width: 400px; }
-.auth-brand-sm { display: none; }
+.auth-mobile-hero { display: none; }
 .auth h1 { font-size: 30px; }
+.last-user { display: flex; gap: 12px; align-items: center; }
+.last-user .avatar { width: 44px; height: 44px; font-size: 16px; }
+.last-user b { display: block; font-family: var(--serif); font-size: 22px; }
 .pw-wrap { position: relative; }
 .pw-wrap input { padding-right: 42px !important; }
 .pw-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; padding: 6px; border-radius: 8px; color: var(--ink-3); cursor: pointer; }
 .pw-eye:hover { background: var(--line-2); color: var(--ink); }
-.remember { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); margin: -4px 0 12px; }
+.caps { font-size: 12px; color: var(--amber); font-weight: 600; margin-top: 4px; }
+.pw-meter { display: flex; gap: 4px; margin-top: 8px; }
+.pw-meter i { flex: 1; height: 4px; border-radius: 2px; background: var(--line-2); transition: background .2s; }
+.pw-meter[data-score="1"] i:nth-child(-n+1) { background: var(--red); }
+.pw-meter[data-score="2"] i:nth-child(-n+2) { background: var(--amber); }
+.pw-meter[data-score="3"] i:nth-child(-n+3) { background: #7cc24a; }
+.pw-meter[data-score="4"] i { background: var(--green); }
+.remember { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); margin: -2px 0 12px; flex-wrap: wrap; }
 .remember input { accent-color: var(--accent); }
 .auth-switch { text-align: center; margin-top: 18px; font-size: 14px; color: var(--ink-2); }
 .auth-legal { text-align: center; margin-top: 26px; font-size: 12px; color: var(--ink-3); }
 .shake { animation: shake .35s; }
 @keyframes shake { 20% { transform: translateX(-6px) } 40% { transform: translateX(6px) } 60% { transform: translateX(-4px) } 80% { transform: translateX(4px) } }
-@media (max-width: 900px) { .auth { grid-template-columns: 1fr; } .auth-side { display: none; } .auth-brand-sm { display: flex; } .auth-main { align-items: start; padding-top: 48px; } }
+@media (max-width: 900px) { .auth { grid-template-columns: 1fr; } .auth-side { display: none; } .auth-mobile-hero { display: block; margin-bottom: 22px; padding-bottom: 18px; border-bottom: 1px solid var(--line); } .auth-main { align-items: start; padding-top: 32px; } }
+@media (max-width: 1150px) { .auth-steps { grid-template-columns: 1fr; } .auth-mock { height: 280px; } }
 
 /* ---------- home ---------- */
 .hero { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-bottom: 20px; }
