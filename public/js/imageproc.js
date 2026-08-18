@@ -193,3 +193,65 @@ export function enhance(src, mode = 'enhanced') {
 }
 
 export function thumbnail(src, maxDim = 400) { return scaleCanvas(src, maxDim); }
+
+// ---------- readability boost: blur detection, upscaling, sharpening ----------
+// Blur score = variance of the Laplacian on a downscaled grayscale (higher = sharper).
+export function blurScore(src) {
+  const small = scaleCanvas(src, 700);
+  const W = small.width, H = small.height;
+  const d = small.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  const g = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) g[i] = d[i * 4] * 0.299 + d[i * 4 + 1] * 0.587 + d[i * 4 + 2] * 0.114;
+  let sum = 0, sum2 = 0, n = 0;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x;
+    const lap = 4 * g[i] - g[i - 1] - g[i + 1] - g[i - W] - g[i + W];
+    sum += lap; sum2 += lap * lap; n++;
+  }
+  const mean = sum / n;
+  return sum2 / n - mean * mean;
+}
+// Upscale small images with high-quality resampling so text has enough pixels for the AI.
+export function upscaleTo(src, minLong = 1800, maxLong = 2400) {
+  const long = Math.max(src.width, src.height);
+  if (long >= minLong) return src;
+  const s = Math.min(maxLong / long, 3);
+  const c = document.createElement('canvas'); c.width = Math.round(src.width * s); c.height = Math.round(src.height * s);
+  const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  // two-step upscale gives smoother edges than one big jump
+  if (s > 2) { const mid = document.createElement('canvas'); mid.width = Math.round(src.width * 2); mid.height = Math.round(src.height * 2); const mctx = mid.getContext('2d'); mctx.imageSmoothingQuality = 'high'; mctx.drawImage(src, 0, 0, mid.width, mid.height); ctx.drawImage(mid, 0, 0, c.width, c.height); }
+  else ctx.drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+// Unsharp mask: out = src + amount * (src - gaussianBlur(src)). radius ≈ 1.5px (5-tap), amount 0.6–1.6.
+export function sharpen(src, amount = 1.0) {
+  if (!amount) return src;
+  const W = src.width, H = src.height;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(src, 0, 0);
+  const img = ctx.getImageData(0, 0, W, H); const d = img.data;
+  const k = [1, 4, 6, 4, 1], ks = 16;
+  const tmp = new Float32Array(W * H * 3), blur = new Float32Array(W * H * 3);
+  // horizontal
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let t = -2; t <= 2; t++) { const xx = Math.min(W - 1, Math.max(0, x + t)); const i = (y * W + xx) * 4; const w = k[t + 2]; r += d[i] * w; g += d[i + 1] * w; b += d[i + 2] * w; }
+    const o = (y * W + x) * 3; tmp[o] = r / ks; tmp[o + 1] = g / ks; tmp[o + 2] = b / ks;
+  }
+  // vertical
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let r = 0, g = 0, b = 0;
+    for (let t = -2; t <= 2; t++) { const yy = Math.min(H - 1, Math.max(0, y + t)); const i = (yy * W + x) * 3; const w = k[t + 2]; r += tmp[i] * w; g += tmp[i + 1] * w; b += tmp[i + 2] * w; }
+    const o = (y * W + x) * 3; blur[o] = r / ks; blur[o + 1] = g / ks; blur[o + 2] = b / ks;
+  }
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    const o = i * 3;
+    for (let ch = 0; ch < 3; ch++) {
+      const v = d[p + ch] + amount * (d[p + ch] - blur[o + ch]);
+      d[p + ch] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}

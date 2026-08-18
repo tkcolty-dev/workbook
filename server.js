@@ -406,19 +406,31 @@ app.post('/api/study/:id/test', auth, async (req, res) => {
   const count = Math.max(3, Math.min(30, parseInt(req.body.count) || 10));
   const types = Array.isArray(req.body.types) && req.body.types.length ? req.body.types : ['mc', 'tf', 'short'];
   const difficulty = req.body.difficulty || 'mixed';
+  const style = req.body.style === 'remake' ? 'remake' : 'standard';
+  const about = String(req.body.about || '').slice(0, 1000);
   try {
-    const out = await ai.completeJSON({
-      system: 'You are an expert teacher who writes fair, accurate practice tests. Output ONLY JSON. Inside JSON strings, write math as LaTeX with $...$ (escape backslashes as \\\\ for valid JSON).\n' + MATH_RULES,
-      prompt: `${studyContext(d, s)}\n\nWrite a practice test with exactly ${count} questions. Allowed question types: ${types.join(', ')} (mc = multiple choice with 4 choices, tf = true/false, short = short written answer). Difficulty: ${difficulty}. Cover the material evenly; make it feel like a real school test on this topic. ${s.tests?.length ? 'Avoid repeating these earlier questions: ' + s.tests.flatMap(t => t.questions.map(q => q.question)).slice(-40).join(' | ') : ''}
+    const seen = s.tests?.length ? 'Avoid repeating these earlier questions: ' + s.tests.flatMap(t => t.questions.map(q => q.question)).slice(-40).join(' | ') : '';
+    const prompt = style === 'remake'
+      ? `${studyContext(d, s)}\n${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about + '\n' : ''}
+Make a PRACTICE WORKSHEET that is a copy of the student's page(s) but with DIFFERENT NUMBERS / values / examples: keep the same kinds of problems, the same order and the same difficulty, and the same skills being practiced (e.g. if the page has "3/4 + 1/8", write "2/5 + 3/10"; if it has a definition to fill in, ask for a similar term from the same topic; if it has a worked example, give a fresh one to solve). Aim for about ${count} problems (fewer only if the page has fewer). Every problem is a short-answer question the student solves and types; give the exact model answer and a short solution/explanation. ${seen}
 Return ONLY JSON:
-{"title":"...","questions":[
+{"title":"...","description":"1-2 sentences: what this worksheet practices and where it came from","questions":[
+ {"id":"q1","type":"short","question":"the new problem (LaTeX for math)","answer":"model answer","explanation":"short solution steps"}
+]}`
+      : `${studyContext(d, s)}\n${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about + '\n' : ''}
+Write a practice test with exactly ${count} questions. Allowed question types: ${types.join(', ')} (mc = multiple choice with 4 choices, tf = true/false, short = short written answer). Difficulty: ${difficulty}. Cover the material evenly; make it feel like a real school test on this topic. ${seen}
+Return ONLY JSON:
+{"title":"...","description":"1-2 sentences: what this test covers and what to focus on","questions":[
  {"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why"},
  {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why"},
  {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"what a good answer must include"}
-]}`,
-      maxTokens: 6000, effort: 'medium',
+]}`;
+    const out = await ai.completeJSON({
+      system: 'You are an expert teacher who writes fair, accurate practice tests and worksheets. Output ONLY JSON. Inside JSON strings, write math as LaTeX with $...$ (escape backslashes as \\\\ for valid JSON).\n' + MATH_RULES,
+      prompt, maxTokens: 6000, effort: 'medium',
     });
-    const test = { id: store.uid(), title: out.title || s.title + ' Practice Test', questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1) })), createdAt: Date.now(), attempts: [] };
+    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : ' Practice Test'), description: String(out.description || ''), style, about, questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1), type: style === 'remake' ? 'short' : q.type })), createdAt: Date.now(), attempts: [] };
+    if (!test.questions.length) throw new Error('The AI returned no questions — try again');
     s.tests.push(test); s.updatedAt = Date.now(); store.save(req.user.id);
     res.json(test);
   } catch (e) { console.error('test:', e.message); res.status(500).json({ error: e.message }); }

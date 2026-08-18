@@ -1,6 +1,6 @@
 import { state, api, $, $$, esc, h, icon, toast, busy, loadNotebooks, invalidate, go } from './core.js';
 import { shell, nbCover, notebookModal } from './app.js';
-import { fileToCanvas, bitmapToCanvas, scaleCanvas, toDataURL, rotateCanvas, rotateCorners, FULL_CORNERS, warp, enhance, thumbnail } from './imageproc.js';
+import { fileToCanvas, bitmapToCanvas, scaleCanvas, toDataURL, rotateCanvas, rotateCorners, FULL_CORNERS, warp, enhance, thumbnail, blurScore, upscaleTo, sharpen } from './imageproc.js';
 
 let stream = null;            // live camera stream
 let S = null;                 // current scan session
@@ -35,7 +35,7 @@ function sidebarHtml() {
       <div style="margin-top:14px" class="pagecount">Page ${S.pageIndex} <small>of ${total}</small></div>
       <div class="progress ${complete ? 'green' : ''}" style="margin:6px 0"><i style="width:${Math.min(100, Math.round(100 * done / total))}%"></i></div>
       <div class="small muted">${complete ? '🎉 You’ve scanned all ' + nb.pageCount + ' planned pages — keep going or finish.' : (nb.pageCount - done) + ' page' + (nb.pageCount - done === 1 ? '' : 's') + ' left'}</div>
-      <div class="btn-row" style="margin-top:12px"><a class="btn sm ${complete ? 'primary' : ''}" href="#/book/${nb.id}">${icon('book')} Read notebook</a><a class="btn sm ghost" href="#/notebook/${nb.id}">Page grid</a>${complete ? `<button class="btn sm" id="morePages">${icon('plus')} Add 10 pages</button>` : ''}</div>
+      <div class="btn-row" style="margin-top:12px"><a class="btn sm ${complete ? 'primary' : ''}" href="#/book/${nb.id}">▶ Slideshow</a><a class="btn sm ghost" href="#/notebook/${nb.id}">Page grid</a>${complete ? `<button class="btn sm" id="morePages">${icon('plus')} Add 10 pages</button>` : ''}</div>
     </div>
     <div class="card" id="jobsCard"><h3>Scanned this session</h3><div id="jobs">${jobsHtml()}</div></div>
     <div class="card flat small muted"><b style="color:var(--ink)">Tips for a clean scan</b><ul style="margin:6px 0 0;padding-left:18px"><li>Lay the page flat in good light</li><li>Fill the frame; a little tilt is fine — AI straightens it</li><li>Avoid your shadow over the page</li></ul></div>
@@ -74,7 +74,7 @@ async function renderCapture(main) {
       stage.innerHTML = ''; stage.appendChild(video); stage.appendChild(h('<div class="guide"></div>'));
       video.play().catch(() => {});
       bar.innerHTML = `${fileBtn('Upload photo')}<button class="shutter" id="shot" title="Take photo (space)"></button><button class="btn icon" id="flipCam" title="Flip camera">${icon('flip')}</button>`;
-      $('#shot').onclick = () => { if (!video.videoWidth) return toast('Camera is still starting…'); const c = bitmapToCanvas(video, 2400); beginAdjust(main, c); };
+      $('#shot').onclick = () => { if (!video.videoWidth) return toast('Camera is still starting…'); const c = bitmapToCanvas(video, 2800); beginAdjust(main, c); };
       $('#flipCam').onclick = async () => { const cur = stream.getVideoTracks()[0].getSettings().facingMode; stopCamera(); try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: cur === 'user' ? { ideal: 'environment' } : 'user' }, audio: false }); video.srcObject = stream; video.play().catch(() => {}); } catch (e) { toast('Could not switch camera', 'err'); renderCapture(main); } };
       wireFiles(main, bar);
       document.onkeydown = (e) => { if (e.code === 'Space' && !e.target.closest('input,textarea,button')) { e.preventDefault(); $('#shot')?.click(); } };
@@ -91,7 +91,7 @@ async function renderCapture(main) {
 // Try progressively simpler constraints; give the permission prompt plenty of time.
 async function openCamera() {
   const attempts = [
-    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1440 } }, audio: false },
+    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 3840 }, height: { ideal: 2160 } }, audio: false },
     { video: { facingMode: { ideal: 'environment' } }, audio: false },
     { video: true, audio: false },
   ];
@@ -117,15 +117,19 @@ function cameraHelp(e) {
 function wireFiles(main, bar) {
   $$('input[type=file]', bar).forEach(inp => inp.onchange = async () => {
     const files = [...inp.files]; if (!files.length) return;
-    if (files.length === 1) { const c = await fileToCanvas(files[0]); beginAdjust(main, c); }
-    else { S.queue = files.slice(1); const c = await fileToCanvas(files[0]); toast(`${files.length} photos — adjusting one at a time`); beginAdjust(main, c); }
+    if (files.length === 1) { const c = await fileToCanvas(files[0], 2800); beginAdjust(main, c); }
+    else { S.queue = files.slice(1); const c = await fileToCanvas(files[0], 2800); toast(`${files.length} photos — adjusting one at a time`); beginAdjust(main, c); }
   });
 }
 
 // ---------- adjust (crop / straighten / filter) ----------
 let A = null; // adjust state
+// Sharpen levels: 0 off, 1 light (default), 2 strong (auto when the photo looks soft/blurry)
+const SHARPEN_AMOUNT = [0, 0.7, 1.4];
 async function beginAdjust(main, srcCanvas) {
-  A = { src: srcCanvas, corners: FULL_CORNERS(), rotation: 0, aiDone: false, disp: null };
+  const score = blurScore(srcCanvas);
+  const blurry = score < 120;             // calibrated (Laplacian variance): crisp ≈ 1000+, 2px-blur ≈ 150–200, 3px-blur ≈ 40
+  A = { src: srcCanvas, corners: FULL_CORNERS(), rotation: 0, aiDone: false, disp: null, blurScore: score, blurry, sharpen: S.sharpen ?? (blurry ? 2 : 1), lowRes: Math.max(srcCanvas.width, srcCanvas.height) < 1400 };
   renderAdjust(main);
   detectCorners(main);
 }
@@ -136,7 +140,9 @@ function renderAdjust(main) {
       <div class="seg" style="margin-bottom:10px"><button class="active" id="tabCrop">Adjust corners</button><button id="tabPrev">Preview result</button></div>
       <div class="crop-wrap" id="crop"><div class="crop-stage"><canvas class="view" id="view"></canvas><svg id="ov"></svg><div class="mag" id="mag"><canvas id="magc" width="120" height="120"></canvas></div></div></div>
       <div class="preview-box hidden" id="prevBox"><div style="padding:30px;text-align:center" class="muted"><span class="spinner"></span></div></div>
+      ${A.blurry || A.lowRes ? `<div class="ai-status" style="margin-top:10px;background:var(--amber-soft);color:#7a4d00">${A.blurry ? '📷 This photo looks a bit soft/blurry' : '🔍 This photo is low resolution'} — Readability boost is set to <b>strong</b> (upscale + sharpen) so the AI can still read it. For best results hold still, tap to focus, and get closer/more light, then Retake.</div>` : ''}
       <div style="margin-top:12px"><div class="small muted" style="margin-bottom:6px;font-weight:600">Look</div><div class="filters" id="filters">${FILTERS.map(([k, l]) => `<button data-f="${k}" class="${S.filter === k ? 'active' : ''}"><canvas></canvas><span>${l}</span></button>`).join('')}</div></div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span class="small muted" style="font-weight:600">Readability boost</span><div class="seg" id="sharpSeg"><button data-s="0" class="${A.sharpen === 0 ? 'active' : ''}">Off</button><button data-s="1" class="${A.sharpen === 1 ? 'active' : ''}">Light</button><button data-s="2" class="${A.sharpen === 2 ? 'active' : ''}">Strong</button></div><span class="small muted">sharpens text and upscales small photos so the AI reads it better${A.blurScore !== undefined ? ` · sharpness ${Math.round(A.blurScore)}` : ''}</span></div>
       <div class="btn-row" style="margin-top:16px;justify-content:space-between"><button class="btn" id="retake">${icon('x')} Retake</button><button class="btn primary lg" id="use">${icon('check')} Save page ${S.pageIndex}</button></div>
     </div>${sidebarHtml()}</div>`;
   wireSide(main);
@@ -150,6 +156,7 @@ function renderAdjust(main) {
   $('#tabCrop').onclick = () => { $('#tabCrop').classList.add('active'); $('#tabPrev').classList.remove('active'); $('#crop').classList.remove('hidden'); $('#prevBox').classList.add('hidden'); };
   $('#tabPrev').onclick = () => { $('#tabPrev').classList.add('active'); $('#tabCrop').classList.remove('active'); $('#crop').classList.add('hidden'); $('#prevBox').classList.remove('hidden'); updatePreview(true); };
   $$('#filters button').forEach(b => b.onclick = () => { $$('#filters button').forEach(x => x.classList.remove('active')); b.classList.add('active'); S.filter = b.dataset.f; localStorage.setItem('dwb_filter', S.filter); updatePreview(); });
+  $$('#sharpSeg button').forEach(b => b.onclick = () => { $$('#sharpSeg button').forEach(x => x.classList.remove('active')); b.classList.add('active'); A.sharpen = +b.dataset.s; S.sharpen = A.sharpen; updatePreview(); });
   $('#use').onclick = () => savePage(main);
   document.onkeydown = (e) => { if (e.key === 'Enter' && !e.target.closest('input,textarea,button')) $('#use')?.click(); if (e.key === 'Escape') $('#retake')?.click(); };
 }
@@ -218,14 +225,18 @@ function updatePreview(force) {
   const box = $('#prevBox'); if (!box || (box.classList.contains('hidden') && !force)) return;
   clearTimeout(prevTimer);
   prevTimer = setTimeout(() => {
-    const c = enhance(warp(scaleCanvas(A.src, 1000), A.corners, 900), S.filter);
+    let c = enhance(warp(scaleCanvas(A.src, 1000), A.corners, 900), S.filter);
+    if (A.sharpen) c = sharpen(c, SHARPEN_AMOUNT[A.sharpen] * 0.8);
     box.innerHTML = ''; box.appendChild(c);
   }, 30);
 }
 function buildFinal() {
-  const warped = warp(A.src, A.corners, 2000);
-  const enhanced = enhance(warped, S.filter);
-  return { enhanced: toDataURL(enhanced, 0.86), original: toDataURL(scaleCanvas(A.src, 1600), 0.8), thumb: toDataURL(thumbnail(enhanced, 420), 0.8) };
+  let warped = warp(A.src, A.corners, 2400);
+  // small pages (far away / low-res camera) get upscaled so letters have enough pixels
+  if (A.sharpen) warped = upscaleTo(warped, A.sharpen === 2 ? 2000 : 1600, 2400);
+  let enhanced = enhance(warped, S.filter);
+  if (A.sharpen) enhanced = sharpen(enhanced, SHARPEN_AMOUNT[A.sharpen]);
+  return { enhanced: toDataURL(enhanced, 0.9), original: toDataURL(scaleCanvas(A.src, 1600), 0.8), thumb: toDataURL(thumbnail(enhanced, 420), 0.8) };
 }
 async function savePage(main) {
   const btn = $('#use'); busy(btn, true, 'Processing…');
@@ -240,7 +251,7 @@ async function savePage(main) {
   invalidate();
   toast(`Page ${idx} saved — AI is reading it`, 'ok');
   // next
-  if (S.queue?.length) { const f = S.queue.shift(); const c = await fileToCanvas(f); beginAdjust(main, c); }
+  if (S.queue?.length) { const f = S.queue.shift(); const c = await fileToCanvas(f, 2800); beginAdjust(main, c); }
   else { A = null; renderCapture(main); }
   // upload + analyze in background
   (async () => {

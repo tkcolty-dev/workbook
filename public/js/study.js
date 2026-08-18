@@ -55,6 +55,7 @@ export async function studyView({ id }, q = {}) {
   const [s, evs] = await Promise.all([api('/study/' + id), loadEvents()]);
   const ev = evs.find(e => e.id === s.eventId);
   if (q.tab) tab = q.tab;
+  if (q.take) { const t = s.tests.find(t => t.id === q.take); if (t) { activeTest = { setId: s.id, test: t, answers: {}, attempt: null }; tab = 'test'; } }
   const TABS = [['sheet', 'sheet', 'Study sheet'], ['online', 'globe', 'More online'], ['test', 'quiz', 'Practice tests'], ['cards', 'cards', 'Flashcards'], ['tutor', 'chat', 'Tutor']];
   main.innerHTML = `<div class="crumbs"><a href="#/study">Study</a> › <span>${esc(s.title)}</span></div>
     <div class="page-head"><div><h1>${esc(s.title)}</h1><div class="sub">${esc(s.subject || '')}${ev ? ` · ${fmtDate(ev.date)} · <b class="countdown ${daysUntil(ev.date) <= 3 ? 'urgent' : ''}">${countdown(ev.date)}</b>` : ''} · ${s.pageIds.length} notebook page${s.pageIds.length === 1 ? '' : 's'}</div></div>
@@ -111,15 +112,50 @@ async function generate(s, kind, btn, label) {
 
 // --- practice tests
 let activeTest = null; // { test, answers, attempt }
+export function testConfigHtml(s, opts = {}) {
+  return `<div class="card flat" style="margin:0 auto 14px;max-width:560px;text-align:left">
+    <div class="field"><label>Test type</label><div class="test-styles">
+      <label class="tstyle ${opts.style !== 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="standard" ${opts.style !== 'remake' ? 'checked' : ''}><b>📝 Standard test</b><span>Multiple choice, true/false and short answers about the material</span></label>
+      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same page, new numbers</b><span>A copy of your page's problems with different numbers/examples — great for math &amp; worksheets</span></label></div></div>
+    <div class="field"><label>What's the test about? <span class="muted">(optional — helps the AI focus)</span></label><input type="text" id="tAbout" class="input" value="${esc(opts.about || s.topic || '')}" placeholder="e.g. adding fractions and repeating decimals, chapter 5 organelles…"></div>
+    <div class="row"><div class="field"><label>Questions</label><select id="tCount">${[5, 10, 15, 20, 30].map(n => `<option ${n === (opts.count || 10) ? 'selected' : ''}>${n}</option>`).join('')}</select></div><div class="field" id="diffField"><label>Difficulty</label><select id="tDiff"><option value="easy">Easy</option><option value="mixed" selected>Mixed</option><option value="hard">Hard</option></select></div></div>
+    <div class="field" id="typesField"><label>Question types</label><div class="btn-row"><label class="chip"><input type="checkbox" class="tType" value="mc" checked> Multiple choice</label><label class="chip"><input type="checkbox" class="tType" value="tf" checked> True / False</label><label class="chip"><input type="checkbox" class="tType" value="short" checked> Short answer</label></div></div></div>`;
+}
+export function wireTestConfig(root = document) {
+  const upd = () => { const remake = $('input[name=tStyle]:checked', root)?.value === 'remake'; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root), df = $('#diffField', root); if (tf) tf.style.display = remake ? 'none' : ''; if (df) df.style.display = remake ? 'none' : ''; };
+  $$('input[name=tStyle]', root).forEach(r => r.onchange = upd); upd();
+}
+export function readTestConfig(root = document) {
+  const style = $('input[name=tStyle]:checked', root)?.value || 'standard';
+  const types = $$('.tType', root).filter(c => c.checked).map(c => c.value);
+  if (style === 'standard' && !types.length) { toast('Pick at least one question type', 'err'); return null; }
+  return { style, types, count: +$('#tCount', root).value, difficulty: $('#tDiff', root)?.value || 'mixed', about: $('#tAbout', root)?.value.trim() || '' };
+}
+// "Test on this page": create a study set from one page and generate a test right away.
+export async function testOnPage(page, nb) {
+  const fake = { topic: '', title: page.title || nb.name };
+  const m = modal(`<h2>Test on this page</h2><p class="muted small" style="margin:-6px 0 12px">“${esc(page.title || 'Page ' + page.index)}” · ${esc(nb.name)}</p>${testConfigHtml(fake, { about: page.title || '', count: 10 })}<div class="actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="goTest">${icon('sparkle')} Make the test</button></div>`, { wide: true });
+  wireTestConfig(m.el);
+  $('#goTest', m.el).onclick = async () => {
+    const cfg = readTestConfig(m.el); if (!cfg) return;
+    busy($('#goTest', m.el), true, cfg.style === 'remake' ? 'Rewriting with new numbers…' : 'Writing your test…');
+    try {
+      const set = await api('/study', { body: { title: (page.title || 'Page ' + page.index) + ' — test', subject: nb.subject || '', topic: cfg.about, pageIds: [page.id] } });
+      const t = await api(`/study/${set.id}/test`, { body: cfg });
+      invalidate(); m.close(); go(`#/study/${set.id}?tab=test&take=${t.id}`);
+    } catch (e) { toast(e.message, 'err'); busy($('#goTest', m.el), false); }
+  };
+}
 function testTab(s, body) {
   if (activeTest && activeTest.setId === s.id) return drawQuiz(s, body);
-  const cfg = `<div class="card flat" style="margin:0 auto 14px;max-width:520px;text-align:left"><div class="row"><div class="field"><label>Questions</label><select id="tCount">${[5, 10, 15, 20, 30].map(n => `<option ${n === 10 ? 'selected' : ''}>${n}</option>`).join('')}</select></div><div class="field"><label>Difficulty</label><select id="tDiff"><option value="easy">Easy</option><option value="mixed" selected>Mixed</option><option value="hard">Hard</option></select></div></div><div class="field"><label>Question types</label><div class="btn-row"><label class="chip"><input type="checkbox" class="tType" value="mc" checked> Multiple choice</label><label class="chip"><input type="checkbox" class="tType" value="tf" checked> True / False</label><label class="chip"><input type="checkbox" class="tType" value="short" checked> Short answer</label></div></div></div>`;
-  body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b><div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}</div></div>`; }).join('')}</div>` : ''}
+  const cfg = testConfigHtml(s);
+  body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b> ${t.style === 'remake' ? '<span class="chip purple">worksheet · new numbers</span>' : ''}${t.description ? `<div class="small" style="margin:2px 0 4px;color:var(--ink-2)">${esc(t.description)}</div>` : ''}<div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}</div></div>`; }).join('')}</div>` : ''}
     ${genBox({ emoji: '✅', title: s.tests.length ? 'Make another practice test' : 'Make a practice test', text: 'AI writes a real test on this material. You take it online and get graded instantly — including your written answers.', btn: 'Generate test', id: 'gen', extra: cfg })}`;
+  wireTestConfig();
   $('#gen').onclick = async () => {
-    const types = $$('.tType').filter(c => c.checked).map(c => c.value); if (!types.length) return toast('Pick at least one question type', 'err');
-    busy($('#gen'), true, 'Writing your test…');
-    try { const t = await api(`/study/${s.id}/test`, { body: { count: +$('#tCount').value, types, difficulty: $('#tDiff').value } }); s.tests.push(t); invalidate(); activeTest = { setId: s.id, test: t, answers: {}, attempt: null }; drawQuiz(s, body); }
+    const cfgv = readTestConfig(); if (!cfgv) return;
+    busy($('#gen'), true, cfgv.style === 'remake' ? 'Rewriting your page with new numbers…' : 'Writing your test…');
+    try { const t = await api(`/study/${s.id}/test`, { body: cfgv }); s.tests.push(t); invalidate(); activeTest = { setId: s.id, test: t, answers: {}, attempt: null }; drawQuiz(s, body); }
     catch (e) { toast(e.message, 'err'); busy($('#gen'), false); }
   };
   $$('.takeT').forEach(b => b.onclick = () => { activeTest = { setId: s.id, test: s.tests.find(t => t.id === b.dataset.id), answers: {}, attempt: null }; drawQuiz(s, body); });
@@ -129,7 +165,7 @@ function testTab(s, body) {
 function drawQuiz(s, body) {
   const { test, answers, attempt } = activeTest;
   const L = 'ABCD';
-  body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px"><div><h2>${esc(test.title)}</h2><div class="muted small">${test.questions.length} questions${attempt ? ' · graded' : ''}</div></div><button class="btn sm" id="backT">${icon('chevL')} All tests</button></div>
+  body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px"><div><h2>${esc(test.title)}</h2>${test.description ? `<div style="color:var(--ink-2);margin:2px 0">${esc(test.description)}</div>` : ''}<div class="muted small">${test.questions.length} ${test.style === 'remake' ? 'problems · same as your page, new numbers' : 'questions'}${attempt ? ' · graded' : ''}</div></div><button class="btn sm" id="backT">${icon('chevL')} All tests</button></div>
     ${attempt ? `<div class="card score-card" style="margin-bottom:16px"><div class="score-ring" style="--p:${attempt.percent}"><div>${attempt.percent}%</div></div><div style="font-family:var(--serif);font-size:20px">${attempt.percent >= 90 ? 'Outstanding! 🌟' : attempt.percent >= 75 ? 'Nice work! 👏' : attempt.percent >= 50 ? 'Getting there — review the misses 💪' : 'Keep studying — you’ve got this 📚'}</div><div class="muted small">${Math.round(attempt.score * 10) / 10} / ${attempt.total} points</div><div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="again">${icon('refresh')} Try again</button><button class="btn" id="newT">${icon('sparkle')} New test</button></div></div>` : ''}
     <div id="qs">${test.questions.map((q, i) => { const r = attempt?.results?.[q.id]; const a = answers[q.id]; return `<div class="q" data-id="${q.id}"><div class="qn">Question ${i + 1} · ${q.type === 'mc' ? 'Multiple choice' : q.type === 'tf' ? 'True or false' : 'Short answer'}</div><div class="qt">${mdi(q.question)}</div>
       ${q.type === 'mc' ? `<div class="choices">${q.choices.map((c, ci) => `<div class="choice ${a === ci ? 'sel' : ''} ${attempt ? (ci === Number(q.answer) ? 'right' : (a === ci ? 'wrong' : '')) : ''}" data-ci="${ci}"><span class="letter">${L[ci]}</span><span>${mdi(c)}</span></div>`).join('')}</div>`
