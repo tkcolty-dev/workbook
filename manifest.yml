@@ -8,6 +8,7 @@ applications:
     command: node server.js
     services:
       - workbook-db
+      - workbook-ai
     env:
       NODE_ENV: production
       OPTIMIZE_MEMORY: true

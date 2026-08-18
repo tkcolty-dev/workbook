@@ -39,7 +39,7 @@ const auth = (req, res, next) => req.user ? next() : res.status(401).json({ erro
 app.set('trust proxy', 1);
 const setSession = (res, token) => res.setHeader('Set-Cookie', `dwb_sid=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${60 * 60 * 24 * 365}${res.req.secure ? '; Secure' : ''}`);
 
-app.get('/api/me', (req, res) => res.json({ user: req.user ? store.users.public(req.user) : null, ai: { mode: ai.USE_CLI ? 'cli' : 'api', model: ai.USE_CLI ? 'claude (local CLI)' : ai.MODEL, available: ai.AVAILABLE }, storage: store.backendName() }));
+app.get('/api/me', (req, res) => res.json({ user: req.user ? store.users.public(req.user) : null, ai: { mode: ai.BACKEND, model: ai.modelLabel(), available: ai.AVAILABLE, webSearch: ai.HAS_WEB_SEARCH }, storage: store.backendName() }));
 
 app.post('/api/auth/register', (req, res) => {
   const { username, password, name } = req.body || {};
@@ -350,18 +350,39 @@ Keep it tight and high-quality — the kind of sheet a top student would make.`,
 app.post('/api/study/:id/online', auth, async (req, res) => {
   const [d, s] = getStudy(req, res); if (!s) return;
   try {
-    const text = await ai.complete({
-      system: 'You are a research librarian for students. You find the best real, free, current online study resources and summarize them honestly. Never invent URLs — only include links you actually found.',
-      webSearch: true,
-      prompt: `${studyContext(d, s)}\n\nSearch the web and find the BEST online study resources for this exact topic (level: school student). Look for: Khan Academy, Quizlet sets, CrashCourse / YouTube videos, study guides, practice quizzes, SparkNotes/CliffsNotes-type summaries, and reputable explainers.
+    let text;
+    if (ai.HAS_WEB_SEARCH) {
+      text = await ai.complete({
+        system: 'You are a research librarian for students. You find the best real, free, current online study resources and summarize them honestly. Never invent URLs — only include links you actually found.',
+        webSearch: true,
+        prompt: `${studyContext(d, s)}\n\nSearch the web and find the BEST online study resources for this exact topic (level: school student). Look for: Khan Academy, Quizlet sets, CrashCourse / YouTube videos, study guides, practice quizzes, SparkNotes/CliffsNotes-type summaries, and reputable explainers.
 Then write Markdown:
 # More Study Help Online: <topic>
 ## Top Picks (5-10 resources — each as "**[Title](URL)** — what it is and why it helps, 1-2 sentences" with an emoji for type: 🎥 video, 📝 study guide, 🃏 flashcards, ✅ practice quiz, 📚 explainer)
 ## Extra Study Sheets & Summaries (short list, with links)
 ## What Others Say Is Most Important (3-6 bullets summarizing key ideas that show up across these sources — this is like a study sheet from the internet)
 Only include real links you found. Prefer free resources.`,
-      maxTokens: 4000, effort: 'medium',
-    });
+        maxTokens: 4000, effort: 'medium',
+      });
+    } else {
+      // No live web search on this backend: ask the model for the best search queries + an "internet study sheet",
+      // then build links that are guaranteed to work (site search pages).
+      const out = await ai.completeJSON({
+        system: 'You help students find study resources. Output ONLY JSON.',
+        prompt: `${studyContext(d, s)}\n\nReturn ONLY JSON:
+{"topic":"short topic name",
+ "queries":[{"label":"what this search finds (e.g. lesson on X, video explaining Y, flashcards for Z)","q":"3-6 topic words ONLY — no site names like Khan Academy/YouTube/Quizlet"}],   // 4-6 varied searches: lesson, video, flashcards, practice quiz, summary
+ "internetSheet":"Markdown: 'What most study sites say is most important' about this topic — 6-10 bullets of the key facts, common exam questions and mistakes, written from general knowledge (LaTeX for math)"}`,
+        maxTokens: 2500,
+      });
+      const enc = encodeURIComponent;
+      const qs = (out.queries || []).slice(0, 6);
+      const topic = out.topic || s.title;
+      const row = (label, links) => `**${label}** — ${links.map(([n, u]) => `[${n}](${u})`).join(' · ')}`;
+      text = `# More Study Help Online: ${topic}\n\n_This server has no live web search, so these are ready-made searches on trusted study sites (they always work) plus a summary of what those sites usually emphasize._\n\n## Top Picks\n` +
+        qs.map(({ label, q }) => `- 🔎 ${row(label || q, [['Khan Academy', `https://www.khanacademy.org/search?page_search_query=${enc(q)}`], ['YouTube', `https://www.youtube.com/results?search_query=${enc(q)}`], ['Quizlet', `https://quizlet.com/search?query=${enc(q)}&type=sets`], ['Google', `https://www.google.com/search?q=${enc(q)}`]])}`).join('\n') +
+        `\n\n## Extra Study Sheets & Summaries\n- 📚 [Wikipedia: ${topic}](https://en.wikipedia.org/w/index.php?search=${enc(topic)}) · 📝 [SparkNotes](https://www.sparknotes.com/search?q=${enc(topic)}) · 🎥 [CrashCourse on YouTube](https://www.youtube.com/results?search_query=${enc('crash course ' + topic)}) · ✅ [Practice quizzes](https://www.google.com/search?q=${enc(topic + ' practice quiz')})\n\n## What Others Say Is Most Important\n${out.internetSheet || ''}`;
+    }
     s.online = text; s.updatedAt = Date.now(); store.save(req.user.id);
     res.json({ online: text });
   } catch (e) { console.error('online:', e.message); res.status(500).json({ error: e.message }); }
@@ -464,10 +485,10 @@ app.post('/api/study/:id/chat', auth, async (req, res) => {
 // SPA fallback
 app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-app.get('/api/health', (req, res) => res.json({ ok: true, storage: store.backendName(), ai: ai.AVAILABLE ? (ai.USE_CLI ? 'cli' : ai.MODEL) : 'unconfigured' }));
+app.get('/api/health', (req, res) => res.json({ ok: true, storage: store.backendName(), ai: ai.AVAILABLE ? ai.BACKEND + ': ' + ai.modelLabel() : 'unconfigured' }));
 
 const PORT = process.env.PORT || 4980;
 store.init().then(() => {
-  app.listen(PORT, () => console.log(`Digital WorkBook running at http://localhost:${PORT}  (AI: ${ai.AVAILABLE ? (ai.USE_CLI ? 'claude CLI' : ai.MODEL) : 'NOT CONFIGURED'})`));
+  app.listen(PORT, () => console.log(`Digital WorkBook running at http://localhost:${PORT}  (AI: ${ai.AVAILABLE ? ai.BACKEND : 'NOT CONFIGURED'})`));
 }).catch(e => { console.error('Storage init failed:', e); process.exit(1); });
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, async () => { try { await store.flushAll(); } catch {} process.exit(0); });

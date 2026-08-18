@@ -15,9 +15,9 @@ export function shell(active, content) {
       <a class="brand" href="#/" style="text-decoration:none;color:inherit"><div class="logo"></div><div class="name">WorkBook<small>Digital Notebook</small></div></a>
       <nav class="nav">${NAV.map(([href, ic, label]) => `<a href="${href}" class="${active === label ? 'active' : ''}">${icon(ic)}${label}</a>`).join('')}</nav>
       <div class="spacer"></div>
-      <a class="nav-a" href="#/settings" style="text-decoration:none"><div class="userbox"><div class="avatar">${esc(initials)}</div><div class="who"><b>${esc(u?.name || u?.username)}</b><span>${state.ai?.mode === 'cli' ? 'AI: Claude (local)' : 'AI: ' + esc(state.ai?.model || '')}</span></div>${icon('settings', 'muted')}</div></a>
+      <a class="nav-a" href="#/settings" style="text-decoration:none"><div class="userbox"><div class="avatar">${esc(initials)}</div><div class="who"><b>${esc(u?.name || u?.username)}</b><span title="${esc(state.ai?.model || '')}">${state.ai?.available === false ? '⚠️ AI not set up' : state.ai?.mode === 'cli' ? 'AI: Claude (local)' : state.ai?.mode === 'anthropic' ? 'AI: Claude' : 'AI: ' + esc((state.ai?.model || '').split(' + ')[0])}</span></div>${icon('settings', 'muted')}</div></a>
     </aside>
-    <main class="main">${content}</main>
+    <main class="main">${state.ai?.available === false ? `<div class="ai-status" style="margin-bottom:14px;background:var(--amber-soft);color:#7a4d00">⚠️ AI features are switched off on this server (no API key). Scanning, notebooks and the planner work; AI reading, study sheets, tests and flashcards will be enabled once a key is added.</div>` : ''}${content}</main>
     <nav class="tabbar">${NAV.map(([href, ic, label]) => label === 'Scan' ? `<a href="${href}" class="scan-tab ${active === label ? 'active' : ''}"><div class="ring">${icon(ic)}</div>Scan</a>` : `<a href="${href}" class="${active === label ? 'active' : ''}">${icon(ic)}${label}</a>`).join('')}</nav>
   </div>`);
   return $('.main');
@@ -319,7 +319,7 @@ async function settingsView() {
   const main = shell('', '');
   main.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
     <div class="grid cols-2"><div class="card"><h3>Profile</h3><div class="field"><label>Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label>Username</label><input type="text" value="${esc(state.user.username)}" disabled></div><button class="btn primary" id="saveP">Save</button></div>
-    <div class="card"><h3>AI</h3><p class="small muted">Scanning, transcription, study sheets, tests and flashcards are powered by Claude.<br>Mode: <b>${state.ai?.mode === 'cli' ? 'local Claude Code CLI' : 'Anthropic API'}</b> · Model: <b>${esc(state.ai?.model || '')}</b></p><h3 style="margin-top:16px">Account</h3><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>`;
+    <div class="card"><h3>AI</h3><p class="small muted">Scanning, transcription, study sheets, tests and flashcards are AI-powered.<br>Backend: <b>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')}</b> · Model: <b>${esc(state.ai?.model || '')}</b>${state.ai?.webSearch === false ? '<br>Live web search: not available on this backend (“More online” uses trusted search links).' : ''}</p><h3 style="margin-top:16px">Account</h3><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>`;
   $('#saveP').onclick = async () => { const r = await api.patch('/me', { name: $('#sName').value }); state.user = r.user; toast('Saved', 'ok'); };
   $('#logout').onclick = async () => { await api('/auth/logout', { body: {} }); state.user = null; invalidate(); go('#/login'); };
 }

@@ -1,29 +1,72 @@
-// AI layer: Claude via the Anthropic API when ANTHROPIC_API_KEY is set,
-// otherwise falls back to the local Claude Code CLI (subscription login).
+// AI layer. Backends, in priority order:
+//   1. Anthropic API (ANTHROPIC_API_KEY)                      — Claude, vision + web search
+//   2. OpenAI-compatible endpoint (Tanzu GenAI binding in VCAP_SERVICES, or OPENAI_API_BASE + OPENAI_API_KEY)
+//   3. Local Claude Code CLI (`claude`, subscription login)   — dev machines
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
-const USE_CLI = !process.env.ANTHROPIC_API_KEY;
 const MODEL = process.env.AI_MODEL || 'claude-opus-5';
 const CLI_MODEL = process.env.AI_CLI_MODEL || 'opus';
 const CLAUDE_BIN = [os.homedir() + '/.local/bin/claude', 'claude'].find(p => {
   try { return p === 'claude' || fs.existsSync(p); } catch { return false; }
 });
 
-let client = null;
-const CLI_OK = USE_CLI && (() => { try { return CLAUDE_BIN === 'claude' ? !!require('child_process').spawnSync('which', ['claude']).stdout?.toString().trim() : fs.existsSync(CLAUDE_BIN); } catch { return false; } })();
-const AVAILABLE = !USE_CLI || CLI_OK;
-if (!USE_CLI) {
-  const Anthropic = require('@anthropic-ai/sdk');
-  client = new Anthropic();
-} else if (CLI_OK) {
-  console.log('No ANTHROPIC_API_KEY — AI features will use the local Claude Code CLI (' + CLAUDE_BIN + ')');
-} else {
-  console.log('WARNING: no ANTHROPIC_API_KEY and no claude CLI — AI features are disabled until ANTHROPIC_API_KEY is set.');
+// ---- detect OpenAI-compatible endpoint (Tanzu GenAI) ----
+function detectOpenAI() {
+  if (process.env.OPENAI_API_BASE && process.env.OPENAI_API_KEY) return { base: process.env.OPENAI_API_BASE.replace(/\/$/, ''), key: process.env.OPENAI_API_KEY, configUrl: process.env.OPENAI_CONFIG_URL || null, name: 'custom' };
+  if (process.env.VCAP_SERVICES) {
+    try {
+      const vcap = JSON.parse(process.env.VCAP_SERVICES);
+      for (const svc of Object.values(vcap).flat()) {
+        const tags = (svc.tags || []).join(',');
+        const ep = svc.credentials?.endpoint || svc.credentials;
+        if ((/genai|ai-models|llm/i.test(tags) || /genai|ai-models/i.test(svc.label || '')) && ep && (ep.openai_api_base || ep.api_base) && ep.api_key) {
+          return { base: (ep.openai_api_base || ep.api_base + '/openai').replace(/\/$/, ''), key: ep.api_key, configUrl: ep.config_url || null, name: ep.name || svc.name };
+        }
+      }
+    } catch (e) { console.error('VCAP_SERVICES parse error (ai):', e.message); }
+  }
+  return null;
 }
-const NOT_CONFIGURED = 'AI is not set up on this server yet — an ANTHROPIC_API_KEY needs to be added (cf set-env … ANTHROPIC_API_KEY …). Scanning and notebooks still work; AI reading, study sheets, tests and flashcards need the key.';
+const OPENAI = detectOpenAI();
+const CLI_OK = (() => { try { return CLAUDE_BIN === 'claude' ? !!require('child_process').spawnSync('which', ['claude']).stdout?.toString().trim() : fs.existsSync(CLAUDE_BIN); } catch { return false; } })();
+const BACKEND = process.env.ANTHROPIC_API_KEY ? 'anthropic' : OPENAI ? 'openai' : CLI_OK ? 'cli' : 'none';
+const USE_CLI = BACKEND === 'cli';
+const AVAILABLE = BACKEND !== 'none';
+const HAS_WEB_SEARCH = BACKEND === 'anthropic' || BACKEND === 'cli';
+
+let client = null;
+if (BACKEND === 'anthropic') { const Anthropic = require('@anthropic-ai/sdk'); client = new Anthropic(); }
+else if (BACKEND === 'openai') console.log('AI: OpenAI-compatible endpoint (' + OPENAI.name + ')');
+else if (BACKEND === 'cli') console.log('No ANTHROPIC_API_KEY — AI features will use the local Claude Code CLI (' + CLAUDE_BIN + ')');
+else console.log('WARNING: no ANTHROPIC_API_KEY, no GenAI binding and no claude CLI — AI features are disabled.');
+const NOT_CONFIGURED = 'AI is not set up on this server yet — an ANTHROPIC_API_KEY needs to be added (or bind a GenAI service). Scanning and notebooks still work; AI reading, study sheets, tests and flashcards need it.';
+
+// OpenAI-compatible: pick text + vision models (env override, else from the endpoint's advertised capabilities, else defaults)
+const OA = { text: process.env.AI_TEXT_MODEL || null, vision: process.env.AI_VISION_MODEL || null, ready: null };
+const TEXT_PREF = ['deepseek-ai/DeepSeek-V4-Flash', 'openai/gpt-oss-120b', 'Qwen/Qwen3', 'google/gemma-4', 'poolside/Laguna', 'cyankiwi/Ornith'];
+const VISION_PREF = ['cyankiwi/Ornith', 'google/gemma-4', 'Qwen/Qwen3'];
+async function oaReady() {
+  if (BACKEND !== 'openai') return;
+  if (OA.ready) return OA.ready;
+  OA.ready = (async () => {
+    if (OA.text && OA.vision) return;
+    let models = [];
+    try {
+      if (OPENAI.configUrl) { const cfg = await fetch(OPENAI.configUrl, { headers: { Authorization: 'Bearer ' + OPENAI.key } }).then(r => r.json()); models = (cfg.advertisedModels || []).map(m => ({ id: m.name, caps: m.capabilities || [] })); }
+      if (!models.length) { const r = await fetch(OPENAI.base + '/v1/models', { headers: { Authorization: 'Bearer ' + OPENAI.key } }).then(r => r.json()); models = (r.data || []).map(m => ({ id: m.id, caps: ['CHAT'] })); }
+    } catch (e) { console.error('model discovery failed:', e.message); }
+    const pick = (prefs, filter) => { const pool = models.filter(filter); for (const p of prefs) { const m = pool.find(m => m.id.startsWith(p)); if (m) return m.id; } return pool[0]?.id || null; };
+    OA.text ||= pick(TEXT_PREF, m => m.caps.includes('CHAT') && !/embed/i.test(m.id)) || 'openai/gpt-oss-120b';
+    OA.vision ||= pick(VISION_PREF, m => m.caps.includes('VISION')) || OA.text;
+    console.log(`AI models: text=${OA.text} vision=${OA.vision}`);
+  })();
+  return OA.ready;
+}
+oaReady();
+function modelLabel() { return BACKEND === 'anthropic' ? MODEL : BACKEND === 'openai' ? ((OA.text || 'GenAI').split('/').pop() + ' + ' + (OA.vision || '').split('/').pop() + ' (vision)') : BACKEND === 'cli' ? 'claude (local CLI)' : 'not configured'; }
 
 // LaTeX inside JSON strings: models often write \frac instead of \\frac. A lone backslash + letters that is
 // not a real JSON escape (\n \t \f \b \r \uXXXX) is doubled; known LaTeX macros that collide with escapes are doubled too.
@@ -56,8 +99,62 @@ function parseJSON(text) {
  */
 async function complete(opts) {
   if (!AVAILABLE) throw new Error(NOT_CONFIGURED);
+  if (BACKEND === 'openai') return completeOpenAI(opts);
   const text = USE_CLI ? await completeCli(opts) : await completeApi(opts);
   return text;
+}
+
+// ---- OpenAI-compatible chat completions ----
+function oaMessages({ system, prompt, messages, images = [] }) {
+  const out = [];
+  if (system) out.push({ role: 'system', content: system });
+  if (messages) { for (const m of messages) out.push({ role: m.role, content: typeof m.content === 'string' ? m.content : m.content.map(c => c.text || '').join('\n') }); }
+  else {
+    const content = [];
+    for (const img of images) content.push({ type: 'image_url', image_url: { url: `data:${img.mediaType || 'image/jpeg'};base64,${img.data}` } });
+    content.push({ type: 'text', text: prompt || '' });
+    out.push({ role: 'user', content: images.length ? content : (prompt || '') });
+  }
+  return out;
+}
+async function oaFetch(body, { stream = false, timeoutMs = 240000 } = {}) {
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(OPENAI.base + '/v1/chat/completions', { method: 'POST', headers: { Authorization: 'Bearer ' + OPENAI.key, 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, stream }), signal: ctrl.signal });
+    if (!r.ok) { const txt = await r.text().catch(() => ''); throw new Error(`AI endpoint error ${r.status}: ${txt.slice(0, 200)}`); }
+    return r;
+  } finally { if (!stream) clearTimeout(t); }
+}
+function stripThink(t) { return String(t || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim(); }
+async function completeOpenAI(opts) {
+  await oaReady();
+  const { images = [], maxTokens = 4000, temperature } = opts;
+  const model = images.length ? OA.vision : OA.text;
+  const r = await oaFetch({ model, max_tokens: maxTokens, temperature: temperature ?? (opts.json ? 0.2 : 0.5), messages: oaMessages(opts) });
+  const o = await r.json();
+  const text = o.choices?.[0]?.message?.content;
+  if (!text) throw new Error('AI returned no text' + (o.error ? ': ' + JSON.stringify(o.error).slice(0, 200) : ''));
+  return stripThink(text);
+}
+async function streamOpenAI({ system, messages, maxTokens = 2000, onText }) {
+  await oaReady();
+  const r = await oaFetch({ model: OA.text, max_tokens: maxTokens, temperature: 0.5, messages: oaMessages({ system, messages }) }, { stream: true, timeoutMs: 300000 });
+  const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '', inThink = false;
+  while (true) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split('\n'); buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim(); if (!payload || payload === '[DONE]') continue;
+      let obj; try { obj = JSON.parse(payload); } catch { continue; }
+      let d = obj.choices?.[0]?.delta?.content; if (!d) continue;
+      // hide <think> blocks if the model emits them
+      if (d.includes('<think>')) { inThink = true; d = d.split('<think>')[0]; }
+      if (inThink) { if (d.includes('</think>')) { inThink = false; d = d.split('</think>').pop(); } else continue; }
+      if (d) onText(d);
+    }
+  }
 }
 
 async function completeApi({ system, prompt, messages, images = [], maxTokens = 4000, effort = 'medium', webSearch = false }) {
@@ -153,6 +250,7 @@ async function completeCli({ system, prompt, messages, images = [], webSearch = 
 /** Streaming chat: calls onText(delta) as text arrives. */
 async function stream({ system, messages, maxTokens = 2000, effort = 'low', onText }) {
   if (!AVAILABLE) throw new Error(NOT_CONFIGURED);
+  if (BACKEND === 'openai') return streamOpenAI({ system, messages, maxTokens, onText });
   if (USE_CLI) {
     let full = (system || '') + '\n\nAnswer directly in this single reply from your own knowledge. Do not use any tools.\n\n';
     full += '--- Conversation so far ---\n' + messages.map(m => (m.role === 'user' ? 'Student: ' : 'Tutor: ') + m.content).join('\n\n') + '\n\nReply to the Student\'s last message now.';
@@ -169,7 +267,7 @@ async function stream({ system, messages, maxTokens = 2000, effort = 'low', onTe
 }
 
 async function completeJSON(opts) {
-  const text = await complete(opts);
+  const text = await complete({ ...opts, json: true });
   try { return parseJSON(text); }
   catch (e) {
     // one repair attempt
@@ -178,4 +276,4 @@ async function completeJSON(opts) {
   }
 }
 
-module.exports = { complete, completeJSON, stream, parseJSON, USE_CLI, MODEL, AVAILABLE };
+module.exports = { complete, completeJSON, stream, parseJSON, USE_CLI, MODEL, AVAILABLE, BACKEND, HAS_WEB_SEARCH, modelLabel };
