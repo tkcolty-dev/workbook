@@ -1,0 +1,13 @@
+applications:
+  - name: workbook
+    memory: 512M
+    disk_quota: 1G
+    instances: 1
+    buildpacks:
+      - nodejs_buildpack
+    command: node server.js
+    services:
+      - workbook-db
+    env:
+      NODE_ENV: production
+      OPTIMIZE_MEMORY: true
