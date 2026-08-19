@@ -13,10 +13,12 @@ const SHARPEN_AMOUNT = [0, 0.7, 1.4];
 function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
 window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/scan')) stopCamera(); });
 
-let HW_MODE = false;
+let HW_MODE = false, PLAN_MODE = false;
 export async function scanView({ id }, q = {}) {
-  HW_MODE = !!q.hw;
-  const main = shell('Scan', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
+  HW_MODE = !!q.hw; PLAN_MODE = !!q.planner;
+  const main = shell(PLAN_MODE ? 'Planner' : 'Scan', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
+  if (PLAN_MODE) { if (!S || !S.planner) S = { planner: true, nbId: null, items: [], filter: 'enhanced', boost: 1 }; renderCapture(main); return; }
+  if (S && S.planner) S = null;
   const nbs = await loadNotebooks(true);
   let nbId = id || localStorage.getItem('dwb_last_nb') || nbs.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id || null;
   if (nbId && !nbs.find(n => n.id === nbId)) nbId = nbs[0]?.id || null;
@@ -36,17 +38,18 @@ async function renderCapture(main) {
   const nb = S.nb;
   main.innerHTML = `<div class="scan2">
     <div class="scan2-top">
-      <div class="nb-pick" id="nbPick"><span class="muted small">Scanning into</span><button class="btn" id="pickBtn">${nbCoverMini(nb)} <b>${esc(nb.name)}</b> <span class="muted">· ${nb.scanned || 0} pages</span> ▾</button></div>
-      <div class="btn-row"><button class="btn sm ghost" id="settings" title="Scan settings">${icon('settings')} Look</button><a class="btn sm" href="#/notebook/${nb.id}">${icon('book')} Open notebook</a></div>
+      ${PLAN_MODE ? `<div class="nb-pick"><span class="muted small">Planner scan</span><b style="font-size:16px">📅 Snap your planner, agenda or syllabus</b></div><div class="btn-row"><a class="btn sm" href="#/planner">${icon('calendar')} Back to planner</a></div>` : `<div class="nb-pick" id="nbPick"><span class="muted small">Scanning into</span><button class="btn" id="pickBtn">${nbCoverMini(nb)} <b>${esc(nb.name)}</b> <span class="muted">· ${nb.scanned || 0} pages</span> ▾</button></div>
+      <div class="btn-row"><button class="btn sm ghost" id="settings" title="Scan settings">${icon('settings')} Look</button><a class="btn sm" href="#/notebook/${nb.id}">${icon('book')} Open notebook</a></div>`}
     </div>
+    ${PLAN_MODE ? `<div class="ai-status" style="margin-bottom:10px">${icon('calendar')} Each photo is read for assignments, tests and due dates. When it's done, tap <b>Review & add</b> on it below.</div>` : ''}
     ${HW_MODE ? `<div class="ai-status" style="margin-bottom:10px">${icon('check')} <b>Homework check mode</b> — snap your finished homework; after it's read, tap <b>Check</b> on it below and the AI grades every answer.</div>` : ''}
     <div class="scan-stage" id="stage"><div class="noCam"><span class="spinner light"></span></div></div>
     <div class="shutter-bar" id="shutterBar"></div>
     <div class="tray" id="tray"></div>
   </div>`;
   drawTray();
-  $('#pickBtn').onclick = pickNotebook;
-  $('#settings').onclick = scanSettings;
+  const pk = $('#pickBtn'); if (pk) pk.onclick = pickNotebook;
+  const sg = $('#settings'); if (sg) sg.onclick = scanSettings;
   const stage = $('#stage'), bar = $('#shutterBar');
   const fileBtn = (label, capture) => `<label class="btn filebtn ${capture ? 'primary lg' : ''}">${icon(capture ? 'camera' : 'upload')} ${label}<input type="file" accept="image/*" ${capture ? 'capture="environment"' : 'multiple'}></label>`;
   const canLive = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext;
@@ -124,7 +127,7 @@ function scanSettings() {
 // ---------- capture pipeline ----------
 let running = 0; const queue = [];
 function addCapture(src) {
-  const item = { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), src, thumb: toDataURL(scaleCanvas(src, 300), 0.7), status: 'queued', label: 'Waiting…', corners: FULL_CORNERS(), rotation: 0, filter: S.filter, boost: S.boost, pageId: null, title: '', suggestions: [], nbId: S.nbId };
+  const item = { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), src, thumb: toDataURL(scaleCanvas(src, 300), 0.7), status: 'queued', label: 'Waiting…', corners: FULL_CORNERS(), rotation: 0, filter: S.filter, boost: S.boost, pageId: null, title: '', suggestions: [], nbId: S.nbId, planner: PLAN_MODE };
   S.items.unshift(item);
   drawTray();
   queue.push(item); pump();
@@ -134,6 +137,16 @@ function pump() {
 }
 async function processItem(it) {
   const set = (status, label) => { it.status = status; it.label = label; drawTray(); };
+  if (PLAN_MODE || it.planner) {
+    try {
+      set('read', 'Reading your planner…');
+      const r = await api('/planner/extract', { body: { image: toDataURL(scaleCanvas(it.src, 1600), 0.85) } });
+      it.planItems = r.items || [];
+      set('ready', it.planItems.length ? `Found ${it.planItems.length} item${it.planItems.length === 1 ? '' : 's'}` : 'No dated items found');
+      if (it.planItems.length) { const { reviewPlannerItems } = await import('./app.js'); reviewPlannerItems(it.planItems, () => { it.added = true; drawTray(); }); }
+    } catch (e) { set('error', 'Failed: ' + e.message); }
+    return;
+  }
   try {
     set('detect', 'Finding page edges…');
     try {
@@ -183,15 +196,16 @@ function drawTray() {
   const tray = $('#tray'); if (!tray) return;
   if (!S.items.length) { tray.innerHTML = `<div class="tray-empty muted small">📸 Snap a page — it's cropped, cleaned and read automatically. Keep snapping; adjust anything later.</div>`; return; }
   const busyN = S.items.filter(i => !['ready', 'error'].includes(i.status)).length;
-  tray.innerHTML = `<div class="tray-head"><b>${S.items.length} scanned this session</b>${busyN ? `<span class="muted small"><span class="spinner" style="width:12px;height:12px"></span> ${busyN} processing</span>` : '<span class="chip green">all done ✓</span>'}<a class="btn sm ghost" href="#/notebook/${S.nbId}">See all pages ${icon('chevR')}</a></div>
+  tray.innerHTML = `<div class="tray-head"><b>${S.items.length} scanned this session</b>${busyN ? `<span class="muted small"><span class="spinner" style="width:12px;height:12px"></span> ${busyN} processing</span>` : '<span class="chip green">all done ✓</span>'}${S.planner ? `<a class="btn sm ghost" href="#/planner">${icon('calendar')} Open planner ${icon('chevR')}</a>` : `<a class="btn sm ghost" href="#/notebook/${S.nbId}">See all pages ${icon('chevR')}</a>`}</div>
     <div class="tray-items">${S.items.map(it => `<div class="tray-item ${it.status}" data-id="${it.id}"><div class="ti-img" style="background-image:url('${it.thumb}')">${it.status !== 'ready' && it.status !== 'error' ? '<div class="ti-spin"><span class="spinner light"></span></div>' : ''}${it.status === 'ready' ? '<div class="ti-ok">✓</div>' : it.status === 'error' ? '<div class="ti-ok err">!</div>' : ''}</div>
       <div class="ti-cap"><b>${it.index ? 'p.' + it.index + ' ' : ''}${esc(it.title || '')}</b><span class="muted">${esc(it.label)}</span></div>
-      <div class="ti-actions"><button class="btn sm ghost adj" title="Adjust crop / look">${icon('edit')}</button>${it.pageId ? `<a class="btn sm ghost" href="#/page/${it.pageId}" title="Open page">${icon('eye')}</a>` : ''}${it.pageId && it.status === 'ready' ? `<button class="btn sm ${HW_MODE ? 'primary' : 'ghost'} hwk" title="Check as homework">${icon('check')}</button>` : ''}${it.status === 'error' ? `<button class="btn sm retry">${icon('refresh')}</button>` : `<button class="btn sm ghost del" title="Delete">${icon('trash')}</button>`}</div>
+      <div class="ti-actions">${it.planner ? (it.planItems?.length ? `<button class="btn sm ${it.added ? '' : 'primary'} planRev">${it.added ? '✓ Added · review again' : '📅 Review & add'}</button>` : '') : `<button class="btn sm ghost adj" title="Adjust crop / look">${icon('edit')}</button>`}${it.pageId ? `<a class="btn sm ghost" href="#/page/${it.pageId}" title="Open page">${icon('eye')}</a>` : ''}${it.pageId && it.status === 'ready' ? `<button class="btn sm ${HW_MODE ? 'primary' : 'ghost'} hwk" title="Check as homework">${icon('check')}</button>` : ''}${it.status === 'error' ? `<button class="btn sm retry">${icon('refresh')}</button>` : `<button class="btn sm ghost del" title="Delete">${icon('trash')}</button>`}</div>
       ${it.suggestions?.some(s => !s.done) ? `<div class="ti-sug">${it.suggestions.map((sg, k) => sg.done ? '' : `<button class="chip amber sug" data-k="${k}">📅 ${esc(sg.title)}${sg.date ? ' · ' + esc(sg.date) : ''} → planner</button>`).join('')}</div>` : ''}
     </div>`).join('')}</div>`;
   $$('.tray-item', tray).forEach(el => {
     const it = S.items.find(i => i.id === el.dataset.id);
-    $('.adj', el).onclick = () => openAdjust(it);
+    const adj = $('.adj', el); if (adj) adj.onclick = () => openAdjust(it);
+    const pr = $('.planRev', el); if (pr) pr.onclick = async () => { const { reviewPlannerItems } = await import('./app.js'); reviewPlannerItems(it.planItems, () => { it.added = true; drawTray(); }); };
     const del = $('.del', el); if (del) del.onclick = async () => { if (it.pageId) { await api.del('/pages/' + it.pageId).catch(() => {}); invalidate(); if (S.nb) S.nb.scanned = Math.max(0, (S.nb.scanned || 1) - 1); } it.cancelled = true; S.items = S.items.filter(i => i !== it); drawTray(); };
     const rt = $('.retry', el); if (rt) rt.onclick = () => { it.status = 'queued'; queue.push(it); pump(); drawTray(); };
     $$('.sug', el).forEach(b => b.onclick = () => addSuggestion(it, it.suggestions[+b.dataset.k]));

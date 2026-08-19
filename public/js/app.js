@@ -1,5 +1,5 @@
 import { state, api, $, $$, esc, h, render, md, mdi, mdPage, hydrateFigures, plain, icon, logoSvg, toast, modal, confirm, busy, todayISO, fmtDate, fmtTime, countdown, daysUntil, ago, TYPES, COLORS, MON, DOW, MONTHS, parseISO, loadNotebooks, loadEvents, loadStudy, invalidate, route, go, dispatch } from './core.js';
-import { scanView, openAdjust, captureModal } from './scan.js';
+import { scanView, openAdjust } from './scan.js';
 import { studyListView, studyView, openNewStudy, testOnPage } from './study.js';
 import { bookView } from './book.js';
 import { registerSW, pushStatus, enablePush, disablePush, testPush, isIOS, isStandalone, pushSupported } from './push.js';
@@ -367,19 +367,14 @@ async function plannerView(_, q) {
     $$('.cal .day, .week-strip .ws').forEach(d => d.onclick = () => { selected = d.dataset.iso; draw(); });
     $('#quickAdd').onkeydown = (e) => { if (e.key === 'Enter') $('#quickGo').click(); };
     $('#quickGo').onclick = async () => { const t = $('#quickAdd').value.trim(); if (!t) return; busy($('#quickGo'), true, '…'); try { const ev = await api('/planner/parse', { body: { text: t } }); eventModal(null, ev.date, { title: ev.title, type: ev.type, subject: ev.subject, notes: ev.notes }); $('#quickAdd').value = ''; } catch (e) { toast(e.message, 'err'); } busy($('#quickGo'), false); };
-    $('#planScan').onclick = async () => { const shots = await captureModal({ title: '📷 Scan my planner', hint: 'Snap your planner, agenda, syllabus or the board — one photo per page. The AI pulls out every assignment, test and due date.' }); if (shots.length) scanPlanner(shots); };
+    $('#planScan').onclick = () => go('#/scan?planner=1');
     wireEventRows(main);
   };
   draw();
   if (q.new) eventModal(null, q.date || today);
 }
-// Scan a paper planner / syllabus: AI extracts every dated item → review → add selected.
-async function scanPlanner(shots) {
-  const { scaleCanvas, toDataURL } = await import('./imageproc.js');
-  const m = modal(`<h2>📷 Reading your planner…</h2><div class="ai-status"><span class="spinner"></span> Finding every assignment, test and due date (${shots.length} photo${shots.length === 1 ? '' : 's'})…</div>`);
-  let items = [];
-  for (const c of shots) { try { const r = await api('/planner/extract', { body: { image: toDataURL(scaleCanvas(c, 1600), 0.85) } }); items.push(...r.items); } catch (e) { toast(e.message, 'err'); } }
-  m.close();
+// Review extracted planner items → add selected.
+export function reviewPlannerItems(items, onAdded) {
   if (!items.length) return toast("Couldn't find any dated items in that photo. Try a closer, straight-on photo.", 'err');
   const mm = modal(`<h2>Found ${items.length} item${items.length === 1 ? '' : 's'}</h2><p class="muted small" style="margin:-6px 0 10px">Check the ones to add. Fix a date or title right here if the AI got it wrong.</p>
     <div class="plan-review">${items.map((it, i) => `<div class="pr-row"><input type="checkbox" class="prc" data-i="${i}" ${it.date ? 'checked' : ''}><input class="input prt" data-i="${i}" value="${esc(it.title)}"><select class="prk" data-i="${i}">${Object.entries(TYPES).filter(([k]) => k !== 'other').map(([k, v]) => `<option value="${k}" ${it.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select><input type="date" class="prd" data-i="${i}" value="${it.date || ''}" title="${esc(it.dateText || '')}"></div>${!it.date ? `<div class="small muted" style="margin:-4px 0 6px 28px">Date unclear (“${esc(it.dateText || '?')}”) — pick one to include it</div>` : ''}`).join('')}</div>
@@ -390,7 +385,7 @@ async function scanPlanner(shots) {
     if (!picked.length) return toast('Pick at least one item with a date', 'err');
     busy($('#addAll', mm.el), true, 'Adding…');
     const r = await api('/events/bulk', { body: { items: picked } });
-    invalidate(); mm.close(); toast(`Added ${r.added} to your planner 🎉`, 'ok'); dispatch(); nudgeReminders();
+    invalidate(); mm.close(); toast(`Added ${r.added} to your planner 🎉`, 'ok'); if (onAdded) onAdded(r); else dispatch(); nudgeReminders();
   };
 }
 export async function eventModal(ev, date, pre = {}) {
