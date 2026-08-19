@@ -65,6 +65,44 @@ export function md(text) {
   try { const { t, slots } = extractMath(text); return restoreMath(marked.parse(t, { breaks: true, gfm: true }), slots).replace(/<a /g, '<a target="_blank" rel="noopener" '); }
   catch { return '<pre>' + esc(text) + '</pre>'; }
 }
+// Page transcript with [[figure:N]] placeholders → figure slots (filled by hydrateFigures with crops of the scan).
+export function mdPage(text, page) {
+  const figs = page?.figures || [];
+  let t = String(text || '');
+  t = t.replace(/\[\[figure:(\d+)\]\]/gi, (m, n) => figs[+n - 1] ? `\n\n⟦FIG${+n - 1}⟧\n\n` : '');
+  let html = md(t);
+  html = html.replace(/<p>\s*⟦FIG(\d+)⟧\s*<\/p>|⟦FIG(\d+)⟧/g, (m, a, b) => { const i = +(a ?? b); const f = figs[i]; return f ? `<figure class="pg-fig" data-fig="${i}"><div class="fig-box"><canvas></canvas></div><figcaption>${esc(f.label || 'Figure')}</figcaption></figure>` : ''; });
+  // figures the model listed but forgot to place → append at the end
+  const placed = new Set([...html.matchAll(/data-fig="(\d+)"/g)].map(m => +m[1]));
+  const rest = figs.map((f, i) => i).filter(i => !placed.has(i));
+  if (rest.length) html += `<div class="pg-figs">${rest.map(i => `<figure class="pg-fig" data-fig="${i}"><div class="fig-box"><canvas></canvas></div><figcaption>${esc(figs[i].label || 'Figure')}</figcaption></figure>`).join('')}</div>`;
+  return html;
+}
+const figImgCache = {};
+export async function hydrateFigures(root, page) {
+  const slots = $$('.pg-fig', root); if (!slots.length || !page?.figures?.length) return;
+  const url = `/api/pages/${page.id}/image?kind=enh&r=${page.rev || 0}`;
+  let img = figImgCache[url];
+  if (!img) { img = new Image(); img.src = url; figImgCache[url] = img; }
+  if (!img.complete || !img.naturalWidth) await new Promise(r => { img.onload = r; img.onerror = r; });
+  if (!img.naturalWidth) return;
+  const IW = img.naturalWidth, IH = img.naturalHeight;
+  for (const el of slots) {
+    const f = page.figures[+el.dataset.fig]; if (!f) continue;
+    const [x, y, w, h] = f.box; const sx = x * IW, sy = y * IH, sw = Math.max(8, w * IW), sh = Math.max(8, h * IH);
+    const cv = $('canvas', el); const scale = Math.min(1, 1200 / sw);
+    cv.width = Math.round(sw * scale); cv.height = Math.round(sh * scale);
+    cv.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, cv.width, cv.height);
+    el.onclick = () => { const m = modal(`<div style="text-align:center"><img src="${cv.toDataURL('image/jpeg', 0.92)}" style="max-width:100%;max-height:80vh;border-radius:8px"><div class="muted small" style="margin-top:8px">${esc(f.label || 'Figure')} · from page ${page.index}</div></div>`, { wide: true }); };
+  }
+}
+// plain-text excerpt of markdown (for lists/search snippets)
+export function plain(text, n = 140) {
+  let t = String(text || '');
+  t = t.replace(/\[\[figure:\d+\]\]/gi, '🖼').replace(/\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g, (m, a, b) => (a || b || '').replace(/\\(frac|dfrac)\{([^}]*)\}\{([^}]*)\}/g, '$2/$3').replace(/\\[a-zA-Z]+/g, '').replace(/[{}]/g, ''));
+  t = t.replace(/^#+\s*/gm, '').replace(/[*_`>~]/g, '').replace(/\|/g, ' ').replace(/\s+/g, ' ').trim();
+  return t.length > n ? t.slice(0, n - 1) + '…' : t;
+}
 // inline (no <p>): for questions, choices, flashcards, key points
 export function mdi(text) {
   try { const { t, slots } = extractMath(text); return restoreMath(marked.parseInline(t, { gfm: true }), slots); }

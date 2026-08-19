@@ -1,7 +1,8 @@
-import { state, api, $, $$, esc, h, render, md, mdi, icon, logoSvg, toast, modal, confirm, busy, todayISO, fmtDate, fmtTime, countdown, daysUntil, ago, TYPES, COLORS, MON, DOW, MONTHS, parseISO, loadNotebooks, loadEvents, loadStudy, invalidate, route, go, dispatch } from './core.js';
-import { scanView } from './scan.js';
+import { state, api, $, $$, esc, h, render, md, mdi, mdPage, hydrateFigures, plain, icon, logoSvg, toast, modal, confirm, busy, todayISO, fmtDate, fmtTime, countdown, daysUntil, ago, TYPES, COLORS, MON, DOW, MONTHS, parseISO, loadNotebooks, loadEvents, loadStudy, invalidate, route, go, dispatch } from './core.js';
+import { scanView, openAdjust } from './scan.js';
 import { studyListView, studyView, openNewStudy, testOnPage } from './study.js';
 import { bookView } from './book.js';
+import { registerSW, pushStatus, enablePush, disablePush, testPush, isIOS, isStandalone, pushSupported } from './push.js';
 
 // ---------- shell ----------
 const NAV = [
@@ -22,7 +23,7 @@ export function shell(active, content) {
   </div>`);
   return $('.main');
 }
-export const nbCover = (nb, extra = '') => `<div class="nb-cover color-${esc(nb.color || 'navy')} ${extra}"><div class="rings"></div><div class="label"><b>${esc(nb.name)}</b><span>${esc(nb.subject || 'Notebook')}</span></div><div class="foot"><div class="progress"><i style="width:${Math.min(100, Math.round(100 * (nb.scanned || 0) / (nb.pageCount || 1)))}%"></i></div><span>${nb.scanned || 0}/${nb.pageCount}</span></div></div>`;
+export const nbCover = (nb, extra = '') => `<div class="nb-cover color-${esc(nb.color || 'navy')} ${extra}"><div class="rings"></div><div class="label"><b>${esc(nb.name)}</b><span>${esc(nb.subject || 'Notebook')}</span></div><div class="foot">${nb.pageCount ? `<div class="progress"><i style="width:${Math.min(100, Math.round(100 * (nb.scanned || 0) / nb.pageCount))}%"></i></div><span>${nb.scanned || 0}/${nb.pageCount}</span>` : `<span></span><span>${nb.scanned || 0} page${nb.scanned === 1 ? '' : 's'}</span>`}</div></div>`;
 
 // ---------- auth ----------
 function authView(mode = 'login') {
@@ -99,39 +100,37 @@ function authView(mode = 'login') {
 // ---------- home ----------
 async function homeView() {
   const main = shell('Home', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
-  const [nbs, evs, sets] = await Promise.all([loadNotebooks(true), loadEvents(true), loadStudy(true)]);
+  const [nbs, evs, sets, recent] = await Promise.all([loadNotebooks(true), loadEvents(true), loadStudy(true), api('/recent?n=8')]);
   const today = todayISO();
-  const upcoming = evs.filter(e => !e.done && e.date >= today).slice(0, 6);
+  const upcoming = evs.filter(e => !e.done && e.date >= today).slice(0, 5);
   const tests = upcoming.filter(e => e.type === 'test' || e.type === 'quiz');
   const hour = new Date().getHours();
   const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
-  const inProgress = nbs.filter(n => n.scanned < n.pageCount).sort((a, b) => b.updatedAt - a.updatedAt)[0];
-  const totalPages = nbs.reduce((s, n) => s + n.scanned, 0);
+  const totalPages = nbs.reduce((s, n) => s + (n.scanned || 0), 0);
+  const lastNb = nbs.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
   main.innerHTML = `
-    <div class="page-head"><div><h1>${greet}, ${esc((state.user.name || state.user.username).split(' ')[0])} 👋</h1><div class="sub">${fmtDate(today, { year: true })} · ${nbs.length} notebook${nbs.length === 1 ? '' : 's'} · ${totalPages} page${totalPages === 1 ? '' : 's'} scanned</div></div></div>
-    <div class="quick" style="margin-bottom:20px">
-      <a href="#/scan">${icon('camera')}Scan pages</a>
-      <a href="#/notebooks?new=1">${icon('book')}New notebook</a>
-      <a href="#/planner?new=1">${icon('calendar')}Add a test / due date</a>
-      <a href="#/study?new=1">${icon('study')}Start studying</a>
-    </div>
+    <div class="page-head"><div><h1>${greet}, ${esc((state.user.name || state.user.username).split(' ')[0])} 👋</h1><div class="sub">${fmtDate(today, { year: true })} · ${nbs.length} notebook${nbs.length === 1 ? '' : 's'} · ${totalPages} page${totalPages === 1 ? '' : 's'}</div></div>
+      <div class="btn-row"><a class="btn lg" href="${lastNb ? '#/scan/' + lastNb.id + '?hw=1' : '#/scan'}" title="Scan your finished homework and the AI checks every answer">${icon('check')} Check homework</a><a class="btn primary lg" href="${lastNb ? '#/scan/' + lastNb.id : '#/scan'}">${icon('camera')} Scan pages</a></div></div>
     <div class="hero">
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><h3>${icon('bell', 'muted')} Coming up</h3><a class="btn sm ghost" href="#/planner">Planner ${icon('chevR')}</a></div>
-        ${upcoming.length ? upcoming.map(eventRow).join('') : `<div class="empty" style="padding:24px"><h3>Nothing scheduled</h3><p class="small">Add tests, quizzes and homework to your planner and WorkBook will remind you and help you study.</p><a class="btn primary sm" href="#/planner?new=1">${icon('plus')} Add to planner</a></div>`}
+      <div>
+        <div class="card" style="margin-bottom:16px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><h3>${icon('camera', 'muted')} Recent pages</h3>${lastNb ? `<a class="btn sm ghost" href="#/notebook/${lastNb.id}">${esc(lastNb.name)} ${icon('chevR')}</a>` : ''}</div>
+          ${recent.length ? `<div class="recent-list">${recent.map(p => `<a class="recent-row" href="#/page/${p.id}"><div class="rthumb" style="background-image:url('/api/pages/${p.id}/image?kind=thumb&r=${p.rev}')"></div><div class="rinfo"><b>${esc(p.title || 'Page ' + p.index)}</b><span class="muted small"><span class="nb-dot color-${esc(p.color)}"></span>${esc(p.notebook)} · p.${p.index} · ${ago(p.createdAt)}${p.status === 'analyzing' ? ' · AI reading…' : p.status === 'error' ? ' · ⚠︎ AI failed' : ''}</span></div>${icon('chevR', 'muted')}</a>`).join('')}</div>` : `<div class="empty" style="padding:22px"><h3>No pages yet</h3><p class="small">Tap <b>Scan pages</b>, point your camera at a page, snap. That's it — WorkBook crops, cleans and reads it.</p></div>`}
+        </div>
+        <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><h3>${icon('book', 'muted')} Notebooks</h3><div class="btn-row"><a class="btn sm ghost" href="#/notebooks?new=1">${icon('plus')} New</a><a class="btn sm ghost" href="#/notebooks">All ${icon('chevR')}</a></div></div>
+          ${nbs.length ? `<div class="nb-list">${nbs.slice().sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 6).map(n => nbRow(n)).join('')}</div>` : `<div class="muted small">Create a notebook to start.</div>`}
+        </div>
       </div>
       <div style="display:flex;flex-direction:column;gap:16px">
         ${tests.length ? `<div class="card" style="background:linear-gradient(135deg,#fff5f2,#fff);border-color:#f7d5cd"><h3>${icon('zap')} Next test</h3><div style="font-family:var(--serif);font-size:22px;margin:4px 0">${esc(tests[0].title)}</div><div class="muted small">${esc(tests[0].subject || '')} · ${fmtDate(tests[0].date)} · <b class="countdown ${daysUntil(tests[0].date) <= 3 ? 'urgent' : ''}">${countdown(tests[0].date)}</b></div><div class="btn-row" style="margin-top:12px"><a class="btn primary sm" href="${tests[0].studyId ? '#/study/' + tests[0].studyId : '#/study?new=1&event=' + tests[0].id}">${icon('study')} ${tests[0].studyId ? 'Keep studying' : 'Study for it'}</a></div></div>` : ''}
-        ${inProgress ? `<div class="card"><h3>${icon('camera')} Continue scanning</h3><div style="display:flex;gap:12px;align-items:center;margin-top:8px"><div style="width:56px">${nbCover(inProgress, 'sm')}</div><div style="flex:1;min-width:0"><b>${esc(inProgress.name)}</b><div class="muted small">${inProgress.scanned} of ${inProgress.pageCount} pages</div><div class="progress" style="margin-top:6px"><i style="width:${Math.round(100 * inProgress.scanned / inProgress.pageCount)}%"></i></div></div></div><a class="btn sm" style="margin-top:12px" href="#/scan/${inProgress.id}">${icon('camera')} Scan page ${inProgress.scanned + 1}</a></div>` : ''}
-        ${sets.length ? `<div class="card"><h3>${icon('study')} Recent study sets</h3>${sets.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 3).map(s => `<a href="#/study/${s.id}" style="display:block;padding:8px 0;border-bottom:1px solid var(--line-2);text-decoration:none;color:inherit"><b>${esc(s.title)}</b><div class="muted small">${esc(s.subject || '')} · ${s.cards?.length || 0} cards · ${s.tests?.length || 0} tests</div></a>`).join('')}</div>` : ''}
+        <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><h3>${icon('bell', 'muted')} Coming up</h3><a class="btn sm ghost" href="#/planner">Planner ${icon('chevR')}</a></div>
+          ${upcoming.length ? upcoming.map(eventRow).join('') : `<div class="muted small">Nothing scheduled. <a href="#/planner?new=1">Add a test or due date</a> — or just scan a page that mentions one and WorkBook will suggest it.</div>`}</div>
+        ${sets.length ? `<div class="card"><h3>${icon('study')} Study sets</h3>${sets.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 3).map(s => `<a href="#/study/${s.id}" style="display:block;padding:8px 0;border-bottom:1px solid var(--line-2);text-decoration:none;color:inherit"><b>${esc(s.title)}</b><div class="muted small">${esc(s.subject || '')} · ${s.cards?.length || 0} cards · ${s.tests?.length || 0} tests</div></a>`).join('')}<a class="btn sm ghost" style="margin-top:8px" href="#/study">All study sets ${icon('chevR')}</a></div>` : `<div class="card"><h3>${icon('study')} Study</h3><div class="muted small">Open any page and tap <b>Test on this</b>, or build a study set for a test.</div><a class="btn sm" style="margin-top:8px" href="#/study?new=1">${icon('plus')} New study set</a></div>`}
       </div>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin:8px 0 12px"><h2>Your notebooks</h2><a class="btn sm ghost" href="#/notebooks">All notebooks ${icon('chevR')}</a></div>
-    <div class="grid auto" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
-      ${nbs.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 5).map(nb => `<a href="${nb.scanned ? '#/book/' + nb.id : '#/notebook/' + nb.id}" style="text-decoration:none">${nbCover(nb)}</a>`).join('')}
-      <a href="#/notebooks?new=1" style="text-decoration:none"><div class="nb-cover new"><div style="text-align:center">${icon('plus')}<div style="font-weight:600;font-size:13px">New notebook</div></div></div></a>
     </div>`;
   wireEventRows(main);
+}
+export function nbRow(n, extra = '') {
+  return `<a class="nb-row" href="#/notebook/${n.id}"><span class="nb-dot big color-${esc(n.color || 'navy')}"></span><div><b>${esc(n.name)}</b><span class="muted small">${esc(n.subject || 'Notebook')} · ${n.scanned || 0} page${n.scanned === 1 ? '' : 's'}${n.pageCount ? ' · goal ' + n.pageCount : ''} · ${ago(n.updatedAt)}</span></div>${extra}${icon('chevR', 'muted')}</a>`;
 }
 export function eventRow(e) {
   const d = parseISO(e.date); const n = daysUntil(e.date);
@@ -148,14 +147,11 @@ export function wireEventRows(root) {
 async function notebooksView(_, q) {
   const main = shell('Notebooks', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
   const nbs = await loadNotebooks(true);
-  main.innerHTML = `<div class="page-head"><div><h1>Notebooks</h1><div class="sub">Every notebook you've digitized. Tap one to open its slideshow.</div></div><div class="btn-row"><div class="search-box">${icon('search')}<input class="input" id="q" placeholder="Search all pages…" style="width:240px"></div><button class="btn primary" id="newNb">${icon('plus')} New notebook</button></div></div>
+  main.innerHTML = `<div class="page-head"><div><h1>Notebooks</h1><div class="sub">Everything you've scanned, one notebook per class or subject.</div></div><div class="btn-row"><div class="search-box">${icon('search')}<input class="input" id="q" placeholder="Search all pages…" style="width:240px"></div><button class="btn primary" id="newNb">${icon('plus')} New notebook</button></div></div>
     <div id="hits"></div>
-    <div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))" id="nbGrid">
-      ${nbs.map(nb => `<a href="${nb.scanned ? '#/book/' + nb.id : '#/notebook/' + nb.id}" style="text-decoration:none">${nbCover(nb)}</a>`).join('')}
-      <div class="nb-cover new" id="newNb2"><div style="text-align:center">${icon('plus')}<div style="font-weight:600;font-size:13px">New notebook</div></div></div>
-    </div>
-    ${!nbs.length ? `<div class="empty" style="margin-top:20px"><div class="big">📓</div><h3>No notebooks yet</h3><p>Create a notebook, tell it how many pages you'll scan, then start scanning with your camera.</p></div>` : ''}`;
-  $('#newNb').onclick = $('#newNb2').onclick = () => notebookModal();
+    ${nbs.length ? `<div class="nb-list big">${nbs.slice().sort((a, b) => b.updatedAt - a.updatedAt).map(n => nbRow(n, `<a class="btn sm ghost" href="#/scan/${n.id}" onclick="event.stopPropagation()">${icon('camera')} Scan</a>`)).join('')}</div>` : `<div class="empty"><div class="big">📓</div><h3>No notebooks yet</h3><p>A notebook is just a name (and a color). Make one, then scan pages into it.</p><button class="btn primary" id="newNb2">${icon('plus')} New notebook</button></div>`}`;
+  $('#newNb').onclick = () => notebookModal();
+  if ($('#newNb2')) $('#newNb2').onclick = () => notebookModal();
   let t; $('#q').oninput = (e) => { clearTimeout(t); t = setTimeout(() => searchPages(e.target.value), 250); };
   if (q.new) notebookModal();
 }
@@ -165,57 +161,80 @@ async function searchPages(qs) {
   const re = new RegExp('(' + qs.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'ig');
   box.innerHTML = hits.length ? `<div class="card" style="margin-bottom:16px"><h3>${hits.length} page${hits.length === 1 ? '' : 's'} match “${esc(qs)}”</h3>${hits.map(hh => `<div class="hit" onclick="location.hash='#/page/${hh.id}'"><b>${esc(hh.notebook)} · Page ${hh.index}${hh.title ? ' — ' + esc(hh.title) : ''}</b><span>${esc(hh.snippet).replace(re, '<mark>$1</mark>')}</span></div>`).join('')}</div>` : `<div class="muted small" style="margin-bottom:12px">No pages match “${esc(qs)}”.</div>`;
 }
-export function notebookModal(nb) {
-  const isNew = !nb; nb = nb || { name: '', subject: '', color: COLORS[Math.floor(Math.random() * 8)], pageCount: 20 };
-  const m = modal(`<h2>${isNew ? 'New notebook' : 'Edit notebook'}</h2>
-    <div style="display:flex;gap:18px;align-items:flex-start"><div style="width:110px;flex-shrink:0" id="prev">${nbCover(nb)}</div><div style="flex:1">
-    <div class="field"><label>Notebook name</label><input type="text" id="nbName" value="${esc(nb.name)}" placeholder="e.g. Biology – Unit 3"></div>
-    <div class="field"><label>Subject / class</label><input type="text" id="nbSubject" value="${esc(nb.subject)}" placeholder="e.g. Biology"></div>
-    <div class="field"><label>How many pages will you scan?</label><input type="number" id="nbPages" min="1" max="500" value="${nb.pageCount}"><div class="help">You can always add more later. This sets your scanning progress bar.</div></div>
-    <div class="field"><label>Cover color</label><div class="swatches">${COLORS.map(c => `<div class="swatch color-${c} ${c === nb.color ? 'active' : ''}" data-c="${c}"></div>`).join('')}</div></div>
-    </div></div>
-    <div class="actions">${!isNew ? `<button class="btn danger" id="del" style="margin-right:auto">${icon('trash')} Delete</button>` : ''}<button class="btn" data-close>Cancel</button><button class="btn primary" id="save">${isNew ? 'Create & start scanning' : 'Save'}</button></div>`);
+export function notebookModal(nb, opts = {}) {
+  const isNew = !nb; nb = nb || { name: '', subject: '', color: COLORS[Math.floor(Math.random() * 8)], pageCount: 0 };
+  const m = modal(`<h2>${isNew ? 'New notebook' : 'Notebook settings'}</h2>
+    <div class="field"><label>Name</label><input type="text" id="nbName" value="${esc(nb.name)}" placeholder="e.g. Biology, Math 7, History notes"></div>
+    <div class="field"><label>Subject / class <span class="muted">(optional)</span></label><input type="text" id="nbSubject" value="${esc(nb.subject)}" placeholder="e.g. Biology"></div>
+    <div class="field"><label>Color</label><div class="swatches">${COLORS.map(c => `<div class="swatch color-${c} ${c === nb.color ? 'active' : ''}" data-c="${c}"></div>`).join('')}</div></div>
+    <details ${nb.pageCount ? 'open' : ''}><summary class="small muted" style="cursor:pointer">Optional: set a page goal</summary><div class="field" style="margin-top:8px"><label>How many pages do you plan to scan?</label><input type="number" id="nbPages" min="0" max="500" value="${nb.pageCount || ''}" placeholder="leave empty for no goal"><div class="help">Just shows a progress bar. You can scan as many pages as you like either way.</div></div></details>
+    <div class="actions">${!isNew ? `<button class="btn danger" id="del" style="margin-right:auto">${icon('trash')} Delete notebook</button>` : ''}<button class="btn" data-close>Cancel</button><button class="btn primary" id="save">${isNew ? 'Create' : 'Save'}</button></div>`);
   const el = m.el; let color = nb.color;
-  const refresh = () => { $('#prev', el).innerHTML = nbCover({ ...nb, name: $('#nbName', el).value || 'Notebook', subject: $('#nbSubject', el).value, color, pageCount: +$('#nbPages', el).value || 1 }); };
-  $$('.swatch', el).forEach(s => s.onclick = () => { $$('.swatch', el).forEach(x => x.classList.remove('active')); s.classList.add('active'); color = s.dataset.c; refresh(); });
-  ['nbName', 'nbSubject', 'nbPages'].forEach(id => $('#' + id, el).oninput = refresh);
+  $$('.swatch', el).forEach(s => s.onclick = () => { $$('.swatch', el).forEach(x => x.classList.remove('active')); s.classList.add('active'); color = s.dataset.c; });
+  $('#nbName', el).onkeydown = (e) => { if (e.key === 'Enter') $('#save', el).click(); };
   $('#save', el).onclick = async () => {
-    const body = { name: $('#nbName', el).value.trim(), subject: $('#nbSubject', el).value.trim(), color, pageCount: +$('#nbPages', el).value || 20 };
+    const body = { name: $('#nbName', el).value.trim(), subject: $('#nbSubject', el).value.trim(), color, pageCount: +$('#nbPages', el).value || 0 };
     if (!body.name) return toast('Give your notebook a name', 'err');
     busy($('#save', el), true, 'Saving…');
     try {
-      if (isNew) { const created = await api('/notebooks', { body }); invalidate(); m.close(); go('#/scan/' + created.id); }
+      if (isNew) { const created = await api('/notebooks', { body }); invalidate(); m.close(); if (opts.then) opts.then(created); else go('#/scan/' + created.id); }
       else { await api.patch('/notebooks/' + nb.id, body); invalidate(); m.close(); dispatch(); }
     } catch (e) { toast(e.message, 'err'); busy($('#save', el), false); }
   };
   if (!isNew) $('#del', el).onclick = async () => { if (await confirm('Delete notebook?', `“${nb.name}” and all its scanned pages will be deleted.`)) { await api.del('/notebooks/' + nb.id); invalidate(); m.close(); go('#/notebooks'); } };
 }
 
-// ---------- notebook view ----------
+// ---------- notebook view: numbered page list ----------
 async function notebookView({ id }) {
   const main = shell('Notebooks', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
   const nb = await api('/notebooks/' + id);
-  const pct = Math.min(100, Math.round(100 * nb.scanned / nb.pageCount));
-  const slots = Math.max(0, nb.pageCount - nb.pages.length);
-  main.innerHTML = `<div class="crumbs"><a href="#/notebooks">Notebooks</a> › <span>${esc(nb.name)}</span></div>
-    <div class="nb-head"><div>${nbCover(nb)}</div><div style="flex:1;min-width:0">
-      <div class="page-head" style="margin-bottom:8px"><div><h1>${esc(nb.name)}</h1><div class="sub">${esc(nb.subject || 'Notebook')} · ${nb.scanned} of ${nb.pageCount} pages scanned</div></div>
-      <div class="btn-row"><button class="btn" id="edit">${icon('edit')} Edit</button>${nb.pages.length ? `<a class="btn dark" href="#/book/${nb.id}">▶ Slideshow</a><button class="btn" id="printNb" title="Print or save the whole notebook as PDF">${icon('print')} PDF</button>` : ''}<a class="btn" href="#/study?new=1&notebook=${nb.id}">${icon('study')} Study this</a><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} ${nb.scanned >= nb.pageCount ? 'Scan more pages' : 'Scan page ' + (nb.scanned + 1)}</a></div></div>
-      <div class="progress ${pct >= 100 ? 'green' : ''}" style="max-width:420px"><i style="width:${pct}%"></i></div>
-      <div class="small muted" style="margin-top:4px">${pct >= 100 ? '✅ All pages scanned' : `${nb.pageCount - nb.scanned} page${nb.pageCount - nb.scanned === 1 ? '' : 's'} to go`}</div>
-    </div></div>
-    ${nb.pages.length ? '' : `<div class="empty"><div class="big">📷</div><h3>No pages yet</h3><p>Point your camera at the first page and WorkBook will crop it, clean it up, and read it with AI.</p><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Start scanning</a></div>`}
-    <div class="pages-grid">
-      ${nb.pages.map(p => `<div class="page-thumb" onclick="location.hash='#/page/${p.id}'"><div class="img" style="background-image:url('/api/pages/${p.id}/image?kind=thumb&r=${p.rev || 0}')"></div><span class="num">p.${p.index}</span>${p.status === 'ready' ? '' : p.status === 'analyzing' ? '<span class="st chip amber">AI reading…</span>' : p.status === 'error' ? '<span class="st chip red">AI failed</span>' : '<span class="st chip">Not read</span>'}<div class="cap"><b>${esc(p.title || 'Page ' + p.index)}</b><span>${p.keyPoints?.length ? p.keyPoints.length + ' key points' : ''}</span></div></div>`).join('')}
-      ${Array.from({ length: Math.min(slots, 12) }, (_, i) => `<div class="page-thumb slot" onclick="location.hash='#/scan/${nb.id}'"><div><b>${nb.pages.length + i + 1}</b>not scanned yet<br><span style="color:var(--accent);font-weight:600">Scan →</span></div></div>`).join('')}
-    </div>`;
-  $('#edit').onclick = () => notebookModal(nb);
-  const pb = $('#printNb'); if (pb) pb.onclick = () => printNotebook(nb);
+  let pages = nb.pages.slice(); let selecting = false; const sel = new Set(); let filter = '';
+  const draw = () => {
+    const shown = filter ? pages.filter(p => (p.title + ' ' + p.transcript).toLowerCase().includes(filter.toLowerCase())) : pages;
+    main.innerHTML = `<div class="crumbs"><a href="#/notebooks">Notebooks</a> › <span>${esc(nb.name)}</span></div>
+    <div class="page-head" style="margin-bottom:14px"><div><h1><span class="nb-dot big color-${esc(nb.color || 'navy')}" style="vertical-align:-2px;margin-right:8px"></span>${esc(nb.name)}</h1><div class="sub">${esc(nb.subject || 'Notebook')} · ${pages.length} page${pages.length === 1 ? '' : 's'}${nb.pageCount ? ` · goal ${nb.pageCount} (${Math.min(100, Math.round(100 * pages.length / nb.pageCount))}%)` : ''}</div></div>
+      <div class="btn-row"><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Scan more</a>${pages.length ? `<a class="btn" href="#/book/${nb.id}">▶ Slideshow</a><a class="btn" href="#/study?new=1&notebook=${nb.id}">${icon('study')} Study</a><button class="btn" id="printNb">${icon('print')} PDF</button>` : ''}<button class="btn icon" id="edit" title="Notebook settings">${icon('settings')}</button></div></div>
+    ${pages.length ? `<div class="list-tools"><div class="search-box">${icon('search')}<input class="input" id="pq" placeholder="Find in this notebook…" value="${esc(filter)}"></div><div class="btn-row">${selecting ? `<span class="muted small">${sel.size} selected</span><button class="btn sm" id="selAll">All</button><button class="btn sm danger" id="delSel" ${sel.size ? '' : 'disabled'}>${icon('trash')} Delete</button><button class="btn sm" id="moveSel" ${sel.size ? '' : 'disabled'}>Move to…</button><button class="btn sm" id="cancelSel">Done</button>` : `<button class="btn sm" id="selMode">Select</button>`}</div></div>
+    <div class="page-list" id="plist">${shown.map(p => `<div class="prow ${sel.has(p.id) ? 'sel' : ''}" data-id="${p.id}" draggable="${selecting ? 'false' : 'true'}">
+        ${selecting ? `<label class="pchk"><input type="checkbox" ${sel.has(p.id) ? 'checked' : ''}></label>` : `<div class="pnum">${p.index}</div>`}
+        <div class="pthumb" style="background-image:url('/api/pages/${p.id}/image?kind=thumb&r=${p.rev || 0}')"></div>
+        <div class="pinfo"><b>${esc(p.title || 'Page ' + p.index)}</b><span class="muted small">${ago(p.createdAt)}${p.keyPoints?.length ? ' · ' + p.keyPoints.length + ' key points' : ''}${p.figures?.length ? ' · 🖼 ' + p.figures.length : ''}${p.suggestions?.some(s => !s.done) ? ' · <span style="color:var(--amber)">📅 planner suggestion</span>' : ''}${p.status === 'analyzing' ? ' · <span class="spinner" style="width:10px;height:10px"></span> AI reading' : p.status === 'error' ? ' · <span style="color:var(--red)">AI failed</span>' : p.status !== 'ready' ? ' · not read yet' : ''}</span><span class="muted small pexcerpt">${esc(plain(p.transcript, 120))}</span></div>
+        <div class="pacts">${selecting ? '' : `<button class="btn icon sm ghost up" title="Move up">${icon('chevL')}</button><button class="btn icon sm ghost down" title="Move down">${icon('chevR')}</button><button class="btn icon sm ghost pdel" title="Delete page">${icon('trash')}</button>`}</div>
+      </div>`).join('')}</div>
+    ${shown.length === 0 ? `<div class="muted small" style="padding:12px">No pages match.</div>` : ''}
+    <div class="muted small" style="margin-top:10px">Tip: drag pages to reorder · tap a page to open it · Select to delete or move several at once.</div>`
+    : `<div class="empty"><div class="big">📷</div><h3>No pages yet</h3><p>Tap Scan more and snap the first page. WorkBook crops it, cleans it up and reads it — you just keep snapping.</p><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Start scanning</a></div>`}`;
+    $('#edit').onclick = () => notebookModal(nb);
+    const pb = $('#printNb'); if (pb) pb.onclick = () => printNotebook({ ...nb, pages });
+    const pq = $('#pq'); if (pq) { pq.oninput = () => { filter = pq.value; const y = window.scrollY; draw(); $('#pq').focus(); $('#pq').setSelectionRange(filter.length, filter.length); window.scrollTo(0, y); }; }
+    const sm = $('#selMode'); if (sm) sm.onclick = () => { selecting = true; sel.clear(); draw(); };
+    const cs = $('#cancelSel'); if (cs) cs.onclick = () => { selecting = false; sel.clear(); draw(); };
+    const sa = $('#selAll'); if (sa) sa.onclick = () => { if (sel.size === pages.length) sel.clear(); else pages.forEach(p => sel.add(p.id)); draw(); };
+    const ds = $('#delSel'); if (ds) ds.onclick = async () => { if (!(await confirm(`Delete ${sel.size} page${sel.size === 1 ? '' : 's'}?`, 'The scans and their digital copies will be removed.'))) return; for (const id of sel) await api.del('/pages/' + id).catch(() => {}); invalidate(); const fresh = await api('/notebooks/' + id); pages = fresh.pages; selecting = false; sel.clear(); draw(); toast('Deleted', 'ok'); };
+    const mv = $('#moveSel'); if (mv) mv.onclick = async () => { const nbs = await loadNotebooks(); const others = nbs.filter(n => n.id !== nb.id); if (!others.length) return toast('No other notebook to move to — create one first', 'err'); const mm = modal(`<h2>Move ${sel.size} page${sel.size === 1 ? '' : 's'} to…</h2><div class="nb-list">${others.map(n => `<button class="nb-row" data-id="${n.id}"><span class="nb-dot color-${esc(n.color)}"></span><div><b>${esc(n.name)}</b><span class="muted small">${n.scanned || 0} pages</span></div></button>`).join('')}</div><div class="actions"><button class="btn" data-close>Cancel</button></div>`); $$('.nb-row', mm.el).forEach(b => b.onclick = async () => { for (const pid of sel) await api.patch('/pages/' + pid, { notebookId: b.dataset.id }).catch(() => {}); mm.close(); invalidate(); const fresh = await api('/notebooks/' + id); pages = fresh.pages; selecting = false; sel.clear(); draw(); toast('Moved', 'ok'); }); };
+    $$('.prow').forEach(row => {
+      const pid = row.dataset.id;
+      row.onclick = (e) => { if (e.target.closest('button,label,input')) return; if (selecting) { sel.has(pid) ? sel.delete(pid) : sel.add(pid); draw(); } else go('#/page/' + pid); };
+      const chk = $('input', row); if (chk) chk.onchange = () => { chk.checked ? sel.add(pid) : sel.delete(pid); draw(); };
+      const up = $('.up', row), down = $('.down', row), del = $('.pdel', row);
+      if (up) up.onclick = () => moveBy(pid, -1); if (down) down.onclick = () => moveBy(pid, 1);
+      if (del) del.onclick = async () => { const p = pages.find(x => x.id === pid); if (await confirm('Delete this page?', `Page ${p.index}${p.title ? ' — ' + p.title : ''} will be removed.`)) { await api.del('/pages/' + pid); invalidate(); const fresh = await api('/notebooks/' + id); pages = fresh.pages; draw(); } };
+      // drag to reorder
+      row.ondragstart = (e) => { e.dataTransfer.setData('text/plain', pid); row.classList.add('dragging'); };
+      row.ondragend = () => row.classList.remove('dragging');
+      row.ondragover = (e) => { e.preventDefault(); row.classList.add('over'); };
+      row.ondragleave = () => row.classList.remove('over');
+      row.ondrop = async (e) => { e.preventDefault(); row.classList.remove('over'); const from = e.dataTransfer.getData('text/plain'); if (!from || from === pid) return; const a = pages.findIndex(p => p.id === from), b = pages.findIndex(p => p.id === pid); const [mvd] = pages.splice(a, 1); pages.splice(b, 0, mvd); await saveOrder(); };
+    });
+  };
+  const moveBy = async (pid, d) => { const i = pages.findIndex(p => p.id === pid); const j = i + d; if (j < 0 || j >= pages.length) return; [pages[i], pages[j]] = [pages[j], pages[i]]; await saveOrder(); };
+  const saveOrder = async () => { const r = await api(`/notebooks/${nb.id}/reorder`, { body: { pageIds: pages.map(p => p.id) } }); r.pages.forEach(x => { const p = pages.find(q => q.id === x.id); if (p) p.index = x.index; }); pages.sort((a, b) => a.index - b.index); invalidate(); draw(); };
+  draw();
 }
 // Print / save-as-PDF: every page with its scan and digital copy.
 function printNotebook(nb) {
   const w = window.open('', '_blank'); if (!w) return toast('Pop-up blocked — allow pop-ups to export', 'err');
-  const pages = nb.pages.map(p => `<section class="pp"><div class="scan"><img src="/api/pages/${p.id}/image?kind=enh&r=${p.rev || 0}"></div><div class="txt"><h2>${esc(p.title || 'Page ' + p.index)} <small>p.${p.index}</small></h2><div class="md">${p.transcript ? md(p.transcript) : '<i>No digital copy</i>'}</div>${p.keyPoints?.length ? `<h3>Key points</h3><ul>${p.keyPoints.map(k => `<li>${mdi(k)}</li>`).join('')}</ul>` : ''}</div></section>`).join('');
+  const pages = nb.pages.map(p => `<section class="pp"><div class="scan"><img src="/api/pages/${p.id}/image?kind=enh&r=${p.rev || 0}"></div><div class="txt"><h2>${esc(p.title || 'Page ' + p.index)} <small>p.${p.index}</small></h2><div class="md">${p.transcript ? md(p.transcript.replace(/\[\[figure:\d+\]\]/g, '')) : '<i>No digital copy</i>'}</div>${p.keyPoints?.length ? `<h3>Key points</h3><ul>${p.keyPoints.map(k => `<li>${mdi(k)}</li>`).join('')}</ul>` : ''}</div></section>`).join('');
   w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${esc(nb.name)}</title><link rel="stylesheet" href="/vendor/katex/katex.min.css"><link rel="stylesheet" href="/css/styles.css"><style>
     body{padding:24px;background:#fff}.cover{text-align:center;padding:120px 0;page-break-after:always}.cover h1{font-size:44px}.cover p{color:#666}
     .pp{display:grid;grid-template-columns:1fr 1fr;gap:24px;page-break-after:always;padding:8px 0;min-height:90vh;align-items:start}.pp .scan img{width:100%;border:1px solid #ddd;border-radius:6px}.pp h2 small{color:#999;font-weight:400;font-size:14px}
@@ -233,33 +252,72 @@ async function pageView({ id }) {
   const idx = nb.pages.findIndex(p => p.id === id);
   const prev = nb.pages[idx - 1], next = nb.pages[idx + 1];
   let kind = 'enh';
+  const sugs = (page.suggestions || []).filter(s => !s.done);
   main.innerHTML = `<div class="crumbs"><a href="#/notebooks">Notebooks</a> › <a href="#/notebook/${nb.id}">${esc(nb.name)}</a> › <span>Page ${page.index}</span></div>
-    <div class="page-head" style="margin-bottom:14px"><div><h1 id="ptitle" contenteditable="true" spellcheck="false" title="Click to rename" style="outline:none;border-bottom:1px dashed transparent">${esc(page.title || 'Page ' + page.index)}</h1><div class="sub">${esc(nb.name)} · page ${page.index} of ${nb.pageCount}${page.readability ? ' · handwriting: ' + esc(page.readability) : ''}</div></div>
-      <div class="btn-row"><button class="btn primary" id="testThis">${icon('quiz')} Test on this</button><button class="btn" id="rerun">${icon('sparkle')} Re-read with AI</button><a class="btn" href="/api/pages/${page.id}/image?kind=enh" download="${esc(nb.name)}-p${page.index}.jpg">${icon('download')} Download</a><button class="btn danger" id="delp">${icon('trash')}</button></div></div>
+    <div class="page-head" style="margin-bottom:14px"><div><h1 id="ptitle" contenteditable="true" spellcheck="false" title="Click to rename" style="outline:none;border-bottom:1px dashed transparent">${esc(page.title || 'Page ' + page.index)}</h1><div class="sub">${esc(nb.name)} · page ${page.index} of ${nb.pages.length} · scanned ${ago(page.createdAt)}${page.readability ? ' · handwriting: ' + esc(page.readability) : ''}</div></div>
+      <div class="btn-row"><button class="btn primary" id="testThis">${icon('quiz')} Test on this</button><button class="btn" id="checkHw">${icon('check')} Check homework</button><button class="btn" id="adjust">${icon('edit')} Adjust</button><button class="btn" id="rerun">${icon('sparkle')} Re-read</button><a class="btn icon" href="/api/pages/${page.id}/image?kind=enh" download="${esc(nb.name)}-p${page.index}.jpg" title="Download">${icon('download')}</a><button class="btn icon danger" id="delp" title="Delete page">${icon('trash')}</button></div></div>
+    ${sugs.length ? `<div class="card sug-card"><h3>📅 Spotted on this page</h3>${sugs.map((sg, k) => `<div class="sug-row"><div><b>${esc(sg.title)}</b> <span class="chip">${esc(TYPES[sg.type] || sg.type)}</span><div class="muted small">${sg.dateText ? '“' + esc(sg.dateText) + '” · ' : ''}${sg.date ? fmtDate(sg.date) + ' · ' + countdown(sg.date) : 'date unknown — pick one'}${sg.notes ? ' · ' + esc(sg.notes) : ''}</div></div><div class="btn-row"><button class="btn sm primary addSug" data-k="${k}">${icon('plus')} Add to planner</button><button class="btn sm ghost dismissSug" data-k="${k}">Dismiss</button></div></div>`).join('')}</div>` : ''}
+    <div id="hwBox">${page.homework ? homeworkHtml(page.homework) : ''}</div>
     <div class="viewer">
-      <div><div class="btn-row" style="justify-content:space-between;margin-bottom:8px"><div class="seg imgtools"><button class="active" data-k="enh">Enhanced</button><button data-k="orig">Original</button></div><span class="muted small">Page ${page.index}</span></div><div class="imgbox"><img id="pimg" src="/api/pages/${page.id}/image?kind=enh&r=${page.rev || 0}" alt="page"></div>
-        <div class="pager">${prev ? `<a class="btn" href="#/page/${prev.id}">${icon('chevL')} Page ${prev.index}</a>` : '<span></span>'}<a class="btn ghost" href="#/book/${nb.id}?p=${page.index}">▶ Slideshow</a>${next ? `<a class="btn" href="#/page/${next.id}">Page ${next.index} ${icon('chevR')}</a>` : `<a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Scan next</a>`}</div>
+      <div><div class="btn-row" style="justify-content:space-between;margin-bottom:8px"><div class="seg imgtools"><button class="active" data-k="enh">Enhanced</button><button data-k="orig">Original</button></div><span class="muted small">${page.figures?.length ? '🖼 ' + page.figures.length + ' picture' + (page.figures.length === 1 ? '' : 's') + ' kept' : ''}</span></div><div class="imgbox"><img id="pimg" src="/api/pages/${page.id}/image?kind=enh&r=${page.rev || 0}" alt="page"></div>
+        <div class="pager">${prev ? `<a class="btn" href="#/page/${prev.id}">${icon('chevL')} Page ${prev.index}</a>` : '<span></span>'}<a class="btn ghost" href="#/notebook/${nb.id}">${icon('book')} All pages</a>${next ? `<a class="btn" href="#/page/${next.id}">Page ${next.index} ${icon('chevR')}</a>` : `<a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Scan next</a>`}</div>
       </div>
       <div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h3><span class="ai-tag">${icon('sparkle')} AI</span> Digital copy</h3><div class="seg"><button class="active" id="mRead">Read</button><button id="mEdit">Edit</button></div></div>
         <div id="tstatus"></div>
-        <div class="paper holes" id="tpaper"><div class="md" id="tread">${page.transcript ? md(page.transcript) : '<span class="muted">No transcript yet — press “Re-read with AI”.</span>'}</div><textarea class="transcript hidden" id="tedit">${esc(page.transcript)}</textarea></div>
+        <div class="paper holes" id="tpaper"><div class="md" id="tread">${page.transcript ? mdPage(page.transcript, page) : '<span class="muted">No digital copy yet — press “Re-read”.</span>'}</div><textarea class="transcript hidden" id="tedit">${esc(page.transcript)}</textarea></div>
         <div id="tsave" class="hidden" style="margin-top:8px;text-align:right"><button class="btn primary sm" id="saveT">Save transcript</button></div>
         ${page.keyPoints?.length ? `<div class="card" style="margin-top:16px"><h3>Key points</h3><ul class="kp">${page.keyPoints.map(k => `<li>${mdi(k)}</li>`).join('')}</ul></div>` : ''}
         ${page.vocab?.length ? `<div class="card" style="margin-top:16px"><h3>Vocabulary</h3><div class="vocab">${page.vocab.map(v => `<div><b>${mdi(v.term)}</b> — ${mdi(v.definition)}</div>`).join('')}</div></div>` : ''}
         ${page.topics?.length ? `<div class="chips" style="margin-top:12px">${page.topics.map(t => `<span class="chip blue">${esc(t)}</span>`).join('')}</div>` : ''}
       </div>
     </div>`;
+  hydrateFigures($('#tread'), page);
   $$('.imgtools button').forEach(b => b.onclick = () => { $$('.imgtools button').forEach(x => x.classList.remove('active')); b.classList.add('active'); kind = b.dataset.k; $('#pimg').src = `/api/pages/${page.id}/image?kind=${kind}&r=${page.rev || 0}`; });
   $('#mRead').onclick = () => { $('#mRead').classList.add('active'); $('#mEdit').classList.remove('active'); $('#tread').classList.remove('hidden'); $('#tedit').classList.add('hidden'); $('#tsave').classList.add('hidden'); };
   $('#mEdit').onclick = () => { $('#mEdit').classList.add('active'); $('#mRead').classList.remove('active'); $('#tread').classList.add('hidden'); $('#tedit').classList.remove('hidden'); $('#tsave').classList.remove('hidden'); $('#tedit').focus(); };
-  $('#saveT').onclick = async () => { const t = $('#tedit').value; await api.patch('/pages/' + page.id, { transcript: t }); page.transcript = t; $('#tread').innerHTML = md(t); $('#mRead').click(); toast('Saved', 'ok'); };
+  $('#saveT').onclick = async () => { const t = $('#tedit').value; await api.patch('/pages/' + page.id, { transcript: t }); page.transcript = t; $('#tread').innerHTML = mdPage(t, page); hydrateFigures($('#tread'), page); $('#mRead').click(); toast('Saved', 'ok'); };
   $('#ptitle').onblur = async () => { const t = $('#ptitle').textContent.trim(); if (t && t !== page.title) { await api.patch('/pages/' + page.id, { title: t }); page.title = t; } };
   $('#ptitle').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } };
   $('#testThis').onclick = () => testOnPage(page, nb);
-  $('#rerun').onclick = async () => { busy($('#rerun'), true, 'AI reading page…'); $('#tstatus').innerHTML = `<div class="ai-status"><span class="spinner"></span> Claude is reading your handwriting…</div>`; try { await api('/pages/' + page.id + '/analyze', { body: {} }); dispatch(); } catch (e) { toast(e.message, 'err'); busy($('#rerun'), false); $('#tstatus').innerHTML = ''; } };
-  $('#delp').onclick = async () => { if (await confirm('Delete this page?', 'The scan and its transcript will be removed.')) { await api.del('/pages/' + page.id); invalidate(); go('#/notebook/' + nb.id); } };
+  $('#checkHw').onclick = () => checkHomework(page, nb);
+  wireHomework(page, nb);
+  $('#adjust').onclick = () => openAdjust({ pageId: page.id, corners: null, filter: page.filter }, () => dispatch());
+  $('#rerun').onclick = async () => { busy($('#rerun'), true, 'Reading…'); $('#tstatus').innerHTML = `<div class="ai-status"><span class="spinner"></span> AI is reading the page…</div>`; try { await api('/pages/' + page.id + '/analyze', { body: {} }); dispatch(); } catch (e) { toast(e.message, 'err'); busy($('#rerun'), false); $('#tstatus').innerHTML = ''; } };
+  $('#delp').onclick = async () => { if (await confirm('Delete this page?', 'The scan and its digital copy will be removed.')) { await api.del('/pages/' + page.id); invalidate(); go('#/notebook/' + nb.id); } };
+  $$('.addSug').forEach(b => b.onclick = () => { const sg = sugs[+b.dataset.k]; eventModal(null, sg.date || undefined, { title: sg.title, type: sg.type, subject: nb.subject || '', notes: sg.notes || '', notebookId: nb.id, onSaved: async () => { sg.done = true; await api.patch('/pages/' + page.id, { suggestions: page.suggestions }); dispatch(); } }); });
+  $$('.dismissSug').forEach(b => b.onclick = async () => { sugs[+b.dataset.k].done = true; await api.patch('/pages/' + page.id, { suggestions: page.suggestions }); dispatch(); });
   document.onkeydown = (e) => { if (e.target.closest('input,textarea,[contenteditable]')) return; if (e.key === 'ArrowLeft' && prev) go('#/page/' + prev.id); if (e.key === 'ArrowRight' && next) go('#/page/' + next.id); };
+}
+
+// ---------- homework checker UI ----------
+export function homeworkHtml(hw) {
+  const v = { correct: ['✅', 'green', 'Correct'], partial: ['🟡', 'amber', 'Partly right'], wrong: ['❌', 'red', 'Wrong'], blank: ['⬜', '', 'No answer'] };
+  return `<div class="card hw-card"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><div><h3>${icon('check')} Homework check <span class="ai-tag">${icon('sparkle')} AI</span></h3><div class="muted small">${hw.assignment ? esc(hw.assignment) + ' · ' : ''}checked ${ago(hw.checkedAt)} · ${hw.items.length} problems</div></div>
+      <div class="hw-score"><div class="score-ring" style="--p:${hw.score.percent};width:64px;height:64px"><div style="width:48px;height:48px;font-size:15px">${hw.score.percent}%</div></div><div class="small"><span class="chip green">${hw.score.correct} ✓</span> ${hw.score.partial ? `<span class="chip amber">${hw.score.partial} partly</span> ` : ''}${hw.score.wrong ? `<span class="chip red">${hw.score.wrong} ✗</span> ` : ''}${hw.score.blank ? `<span class="chip">${hw.score.blank} blank</span>` : ''}</div></div></div>
+    ${hw.summary ? `<p style="margin:8px 0 4px">${esc(hw.summary)}</p>` : ''}
+    <div class="hw-items">${hw.items.map(it => `<div class="hw-item ${it.verdict}"><div class="hw-n">${esc(it.n)}</div><div class="hw-body"><div class="hw-q">${mdi(it.problem)}</div><div class="small"><span class="muted">You wrote:</span> <b>${it.studentAnswer ? mdi(it.studentAnswer) : '<i class="muted">nothing</i>'}</b> <span class="chip ${v[it.verdict][1]}">${v[it.verdict][0]} ${v[it.verdict][2]}</span></div>${it.verdict !== 'correct' ? `<div class="hw-fix"><b>Correct answer:</b> ${mdi(it.correctAnswer)}${it.explanation ? `<div style="margin-top:3px">${mdi(it.explanation)}</div>` : ''}</div>` : ''}</div></div>`).join('')}</div>
+    ${hw.tips?.length ? `<div class="hw-tips"><b>What to practice</b><ul>${hw.tips.map(t => `<li>${mdi(t)}</li>`).join('')}</ul></div>` : ''}
+    <div class="btn-row" style="margin-top:10px"><button class="btn sm" id="recheck">${icon('refresh')} Check again</button><button class="btn sm primary" id="practiceSimilar">${icon('quiz')} Practice similar problems</button></div></div>`;
+}
+export function wireHomework(page, nb) {
+  const rc = $('#recheck'); if (rc) rc.onclick = () => checkHomework(page, nb);
+  const ps = $('#practiceSimilar'); if (ps) ps.onclick = () => testOnPage(page, nb);
+}
+export async function checkHomework(page, nb) {
+  const m = modal(`<h2>Check my homework</h2><p class="muted small" style="margin:-6px 0 12px">AI reads every problem and your answer on this page, solves each one, and tells you what's right, what's off and why.</p>
+    <div class="field"><label>Anything the AI should know? <span class="muted">(optional)</span></label><input class="input" id="hwHint" placeholder="e.g. it's a fractions worksheet, answers are in the right column, ignore question 5"></div>
+    <div class="actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="goHw">${icon('check')} Check it</button></div>`);
+  $('#goHw', m.el).onclick = async () => {
+    busy($('#goHw', m.el), true, 'Reading & checking… (20–60s)');
+    try {
+      const hw = await api('/pages/' + page.id + '/check', { body: { hint: $('#hwHint', m.el).value.trim() } });
+      page.homework = hw; m.close();
+      const box = $('#hwBox'); if (box) { box.innerHTML = homeworkHtml(hw); wireHomework(page, nb); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      else go('#/page/' + page.id);
+      toast(`Checked: ${hw.score.percent}%`, 'ok');
+    } catch (e) { toast(e.message, 'err'); busy($('#goHw', m.el), false); }
+  };
 }
 
 // ---------- planner ----------
@@ -301,8 +359,8 @@ async function plannerView(_, q) {
   draw();
   if (q.new) eventModal(null, q.date || today);
 }
-export async function eventModal(ev, date) {
-  const isNew = !ev; ev = ev || { title: '', type: 'test', subject: '', date: date || todayISO(), time: '', notes: '', notebookId: '' };
+export async function eventModal(ev, date, pre = {}) {
+  const isNew = !ev; ev = ev || { title: pre.title || '', type: pre.type || 'test', subject: pre.subject || '', date: date || todayISO(), time: '', notes: pre.notes || '', notebookId: pre.notebookId || '' };
   const nbs = await loadNotebooks();
   const m = modal(`<h2>${isNew ? 'Add to planner' : 'Edit'}</h2>
     <div class="field"><label>What is it?</label><input type="text" id="evTitle" value="${esc(ev.title)}" placeholder="e.g. Chapter 5 test — cells"></div>
@@ -317,7 +375,7 @@ export async function eventModal(ev, date) {
     const body = { title: $('#evTitle', el).value.trim(), type: $('#evType', el).value, subject: $('#evSubject', el).value.trim(), date: $('#evDate', el).value, time: $('#evTime', el).value, notes: $('#evNotes', el).value, notebookId: $('#evNb', el).value || null };
     if (!body.title || !body.date) return toast('Add a title and a date', 'err');
     try {
-      if (isNew) { const created = await api('/events', { body }); invalidate(); m.close(); toast('Added to planner', 'ok'); if ((body.type === 'test' || body.type === 'quiz') && daysUntil(body.date) >= 0) { if (await confirm('Start a study set?', `Want WorkBook to build a study sheet, practice test and flashcards for “${body.title}”?`, { danger: false, ok: 'Yes, let’s study' })) return go('#/study?new=1&event=' + created.id); } dispatch(); }
+      if (isNew) { const created = await api('/events', { body }); invalidate(); m.close(); toast('Added to planner', 'ok'); if (pre.onSaved) pre.onSaved(created); nudgeReminders(); if ((body.type === 'test' || body.type === 'quiz') && daysUntil(body.date) >= 0) { if (await confirm('Start a study set?', `Want WorkBook to build a study sheet, practice test and flashcards for “${body.title}”?`, { danger: false, ok: 'Yes, let’s study' })) return go('#/study?new=1&event=' + created.id); } dispatch(); }
       else { await api.patch('/events/' + ev.id, body); invalidate(); m.close(); dispatch(); }
     } catch (e) { toast(e.message, 'err'); }
   };
@@ -327,14 +385,33 @@ export async function eventModal(ev, date) {
   }
 }
 
+// one-time nudge to turn on reminders after the first planner item
+async function nudgeReminders() {
+  try { if (localStorage.getItem('dwb_nudged')) return; const st = await pushStatus(); if (st.enabled) return; localStorage.setItem('dwb_nudged', '1');
+    const mm = modal(`<h2>🔔 Want a reminder?</h2><p class="muted">WorkBook can ping this device 3 days before, the day before and the morning of each test so you actually study.</p><div class="actions"><button class="btn" data-close>Not now</button><button class="btn primary" id="nOn">Turn on reminders</button></div>`);
+    $('#nOn', mm.el).onclick = async () => { busy($('#nOn', mm.el), true, 'Turning on…'); try { await enablePush(); toast('Reminders on 🎉', 'ok'); mm.close(); } catch (e) { toast(e.message, 'err'); mm.close(); } };
+  } catch {}
+}
 // ---------- settings ----------
 async function settingsView() {
   const main = shell('', '');
+  const st = await pushStatus();
+  const prefs = state.user.settings?.reminders || {};
   main.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
-    <div class="grid cols-2"><div class="card"><h3>Profile</h3><div class="field"><label>Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label>Username</label><input type="text" value="${esc(state.user.username)}" disabled></div><button class="btn primary" id="saveP">Save</button></div>
-    <div class="card"><h3>AI</h3><p class="small muted">Scanning, transcription, study sheets, tests and flashcards are AI-powered.<br>Backend: <b>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')}</b> · Model: <b>${esc(state.ai?.model || '')}</b>${state.ai?.webSearch === false ? '<br>Live web search: not available on this backend (“More online” uses trusted search links).' : ''}</p><h3 style="margin-top:16px">Account</h3><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>`;
+    <div class="grid cols-2">
+    <div class="card"><h3>🔔 Reminders</h3><p class="small muted" style="margin:4px 0 10px">WorkBook pings this device when it's time to study: <b>3 days before</b> a test (4pm), <b>the day before</b> (6pm), and <b>the morning of</b> (7am). Homework/projects: day before + day of.</p>
+      <div id="pushBox">${st.enabled ? `<div class="ai-status" style="background:var(--green-soft);color:#14663f">✅ Reminders are ON for this device</div><div class="btn-row" style="margin-top:10px"><button class="btn sm" id="pushTest">Send a test notification</button><button class="btn sm danger" id="pushOff">Turn off</button></div>` : `<button class="btn primary" id="pushOn">${icon('bell')} Turn on reminders on this device</button>${isIOS() && !isStandalone() ? '<div class="small muted" style="margin-top:8px">📱 On iPhone/iPad: tap <b>Share → Add to Home Screen</b>, open WorkBook from there, then tap this button.</div>' : ''}${!pushSupported() && !isIOS() ? '<div class="small muted" style="margin-top:8px">This browser doesn’t support notifications.</div>' : ''}`}</div>
+      <div style="margin-top:12px" class="small"><b>Which reminders</b><div class="btn-row" style="margin-top:6px"><label class="chip"><input type="checkbox" class="rp" data-k="d3" ${prefs.d3 === false ? '' : 'checked'}> 3 days before</label><label class="chip"><input type="checkbox" class="rp" data-k="d1" ${prefs.d1 === false ? '' : 'checked'}> Day before</label><label class="chip"><input type="checkbox" class="rp" data-k="d0" ${prefs.d0 === false ? '' : 'checked'}> Morning of</label></div></div>
+      <p class="small muted" style="margin-top:10px">Want real text messages? That needs an SMS account (Twilio) — ask Colton to hook it up.</p></div>
+    <div class="card"><h3>Profile</h3><div class="field"><label>Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label>Username</label><input type="text" value="${esc(state.user.username)}" disabled></div><button class="btn primary" id="saveP">Save</button>
+      <h3 style="margin-top:18px">AI</h3><p class="small muted">Backend: <b>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')}</b> · Model: <b>${esc(state.ai?.model || '')}</b></p>
+      <h3 style="margin-top:18px">Account</h3><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>`;
   $('#saveP').onclick = async () => { const r = await api.patch('/me', { name: $('#sName').value }); state.user = r.user; toast('Saved', 'ok'); };
   $('#logout').onclick = async () => { await api('/auth/logout', { body: {} }); state.user = null; invalidate(); localStorage.removeItem('dwb_last_user'); go('#/login'); };
+  const on = $('#pushOn'); if (on) on.onclick = async () => { busy(on, true, 'Turning on…'); try { await enablePush(); toast('Reminders on 🎉', 'ok'); settingsView(); } catch (e) { toast(e.message, 'err'); busy(on, false); } };
+  const off = $('#pushOff'); if (off) off.onclick = async () => { await disablePush(); toast('Reminders off'); settingsView(); };
+  const tp = $('#pushTest'); if (tp) tp.onclick = () => testPush();
+  $$('.rp').forEach(c => c.onchange = async () => { const rem = { ...(state.user.settings?.reminders || {}) }; rem[c.dataset.k] = c.checked; const r = await api.patch('/me', { settings: { reminders: rem } }); state.user = r.user; });
 }
 
 // ---------- routes ----------
@@ -354,6 +431,7 @@ route('/settings', settingsView);
 
 async function boot() {
   try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; } catch {}
+  registerSW();
   const guard = async () => {
     const hash = location.hash || '#/';
     if (!state.user && !/^#\/(login|register)/.test(hash)) { return authView(hash === '#/register' ? 'register' : 'login'); }

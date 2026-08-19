@@ -110,6 +110,7 @@ const saveUsers = () => persist('users', () => users);
 const saveSessions = () => persist('sessions', () => sessions);
 
 const usersApi = {
+  all: () => users,
   find: (username) => users.find(u => u.username.toLowerCase() === String(username).toLowerCase()),
   byId: (id) => users.find(u => u.id === id),
   create: ({ username, password, name }) => { const { salt, hash } = hashPassword(password); const u = { id: uid(), username, name: name || username, salt, hash, createdAt: Date.now() }; users.push(u); saveUsers(); return u; },
@@ -144,4 +145,7 @@ async function readImage(userId, pageId, kind) { return backend.getBlob(blobKey(
 async function readImageBase64(userId, pageId, kind) { const b = await readImage(userId, pageId, kind); return b ? b.toString('base64') : null; }
 async function deleteImages(userId, pageId) { for (const k of ['orig', 'enh', 'thumb']) await backend.delBlob(blobKey(userId, pageId, k)); }
 
-module.exports = { init, users: usersApi, sessions: sessionsApi, db, save, uid, saveImage, readImage, readImageBase64, deleteImages, flushAll, backendName: () => backend?.name };
+const misc = {};
+async function getDoc(key) { if (misc[key] !== undefined) return misc[key]; const r = await backend.loadDocs(key); misc[key] = r[0]?.value ?? null; return misc[key]; }
+async function setDoc(key, value) { misc[key] = value; await backend.saveDoc(key, value); }
+module.exports = { getDoc, setDoc, init, users: usersApi, sessions: sessionsApi, db, save, uid, saveImage, readImage, readImageBase64, deleteImages, flushAll, backendName: () => backend?.name };

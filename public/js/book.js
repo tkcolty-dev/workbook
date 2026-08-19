@@ -1,6 +1,6 @@
 // Slideshow view: one big page at a time — arrows, keys, swipe, filmstrip, autoplay, fullscreen,
 // and a toggle to show the AI digital copy next to (or instead of) the scan.
-import { api, $, $$, esc, h, md, icon, toast, go } from './core.js';
+import { api, $, $$, esc, h, md, mdPage, hydrateFigures, icon, toast, go, confirm, invalidate } from './core.js';
 import { shell } from './app.js';
 import { testOnPage } from './study.js';
 
@@ -38,11 +38,13 @@ function togglePlay() { if (B.playing) stopPlay(); else { B.playing = true; $('#
 function stopPlay() { B.playing = false; clearInterval(B.timer); const b = $('#play'); if (b) b.textContent = '▶ Play'; }
 function draw() {
   const p = B.pages[B.i]; const stage = $('#stage'); if (!stage || !p) return;
-  const scan = `<div class="slide-scan"><img src="/api/pages/${p.id}/image?kind=enh&r=${p.rev || 0}" alt="Page ${p.index}" draggable="false"><div class="open-pg btn-row"><button class="btn sm primary" id="testThis">${icon('quiz')} Test on this</button><a class="btn sm" href="#/page/${p.id}" title="Open page">${icon('eye')} Open</a></div></div>`;
-  const notes = `<div class="slide-notes paper holes"><div class="pg-title">${esc(p.title || 'Page ' + p.index)}</div><div class="md">${p.transcript ? md(p.transcript) : '<span class="muted">No digital copy yet — open the page and press “Re-read with AI”.</span>'}</div>${p.keyPoints?.length ? `<div class="slide-kp"><b>Key points</b><ul>${p.keyPoints.map(k => `<li>${md(k).replace(/^<p>|<\/p>\s*$/g, '')}</li>`).join('')}</ul></div>` : ''}</div>`;
+  const scan = `<div class="slide-scan"><img src="/api/pages/${p.id}/image?kind=enh&r=${p.rev || 0}" alt="Page ${p.index}" draggable="false"><div class="open-pg btn-row"><button class="btn sm primary" id="testThis">${icon('quiz')} Test on this</button><a class="btn sm" href="#/page/${p.id}" title="Open page">${icon('eye')} Open</a><button class="btn sm icon danger" id="delSlide" title="Delete this page">${icon('trash')}</button></div></div>`;
+  const notes = `<div class="slide-notes-wrap"><div class="slide-notes paper holes" id="slideNotes"><div class="pg-title">${esc(p.title || 'Page ' + p.index)}</div><div class="md">${p.transcript ? mdPage(p.transcript, p) : '<span class="muted">No digital copy yet — open the page and press “Re-read”.</span>'}</div>${p.keyPoints?.length ? `<div class="slide-kp"><b>Key points</b><ul>${p.keyPoints.map(k => `<li>${md(k).replace(/^<p>|<\/p>\s*$/g, '')}</li>`).join('')}</ul></div>` : ''}</div><div class="slide-notes-more" id="notesMore"><a class="btn sm" href="#/page/${p.id}">${icon('eye')} Open full page</a><span class="muted small">scroll for more ↓</span></div></div>`;
   const slide = h(`<div class="slide mode-${B.mode} ${B.dir > 0 ? 'from-right' : B.dir < 0 ? 'from-left' : ''}">${B.mode === 'notes' ? notes : B.mode === 'scan' ? scan : scan + notes}</div>`);
   stage.innerHTML = ''; stage.appendChild(slide);
   const tb = $('#testThis', slide); if (tb) tb.onclick = () => { stopPlay(); testOnPage(p, B.nb); };
+  const db = $('#delSlide', slide); if (db) db.onclick = async () => { stopPlay(); if (await confirm('Delete this page?', `Page ${p.index}${p.title ? ' — ' + p.title : ''} will be removed.`)) { await api.del('/pages/' + p.id); invalidate(); B.pages = B.pages.filter(x => x !== p); B.pages.forEach((x, k) => { x.index = k + 1; }); if (!B.pages.length) return go('#/notebook/' + B.nb.id); B.i = Math.min(B.i, B.pages.length - 1); $('#strip').innerHTML = B.pages.map((q, k) => `<div class="bs" data-k="${k}" style="background-image:url('/api/pages/${q.id}/image?kind=thumb&r=${q.rev || 0}')"></div>`).join(''); $$('#strip .bs').forEach(el => el.onclick = () => { B.i = +el.dataset.k; draw(); }); draw(); toast('Page deleted', 'ok'); } };
+  const sn = $('#slideNotes', slide); if (sn) { hydrateFigures(sn, p); const more = $('#notesMore', slide); const chk = () => { if (more) more.classList.toggle('show', sn.scrollHeight > sn.clientHeight + 8 && sn.scrollTop < sn.scrollHeight - sn.clientHeight - 8); }; sn.onscroll = chk; setTimeout(chk, 50); }
   $('#pos').innerHTML = `<b>${B.i + 1} / ${B.pages.length}</b>${p.title ? ` <span class="muted">· ${esc(p.title)}</span>` : ''}`;
   $('#dots').innerHTML = B.pages.length <= 20 ? B.pages.map((_, k) => `<i class="${k === B.i ? 'on' : ''}" data-k="${k}"></i>`).join('') : '';
   $$('#dots i').forEach(d => d.onclick = () => { B.i = +d.dataset.k; draw(); });

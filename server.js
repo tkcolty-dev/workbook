@@ -17,6 +17,7 @@ for (const envPath of [__dirname + '/.env', __dirname + '/../Calorie_Counter/ser
 
 const ai = require('./ai');
 const store = require('./store');
+const notify = require('./notify');
 
 const app = express();
 app.use(express.json({ limit: '40mb' }));
@@ -80,6 +81,26 @@ app.patch('/api/me', auth, (req, res) => {
   res.json({ user: store.users.public(req.user) });
 });
 
+// ---------- push reminders ----------
+app.get('/api/push/key', auth, (req, res) => res.json({ key: notify.publicKey(), subscribed: (req.user.push || []).length > 0, reminders: req.user.settings?.reminders || {} }));
+app.post('/api/push/subscribe', auth, (req, res) => {
+  const { subscription, tz } = req.body || {};
+  if (!subscription?.endpoint) return res.status(400).json({ error: 'bad subscription' });
+  const list = (req.user.push || []).filter(s => s.subscription?.endpoint !== subscription.endpoint);
+  list.push({ subscription, tz: Number(tz) || 0, ua: String(req.headers['user-agent'] || '').slice(0, 120), at: Date.now() });
+  store.users.update(req.user, { push: list.slice(-6) });
+  res.json({ ok: true, count: list.length });
+});
+app.delete('/api/push/subscribe', auth, (req, res) => {
+  const endpoint = req.body?.endpoint;
+  store.users.update(req.user, { push: endpoint ? (req.user.push || []).filter(s => s.subscription?.endpoint !== endpoint) : [] });
+  res.json({ ok: true });
+});
+app.post('/api/push/test', auth, async (req, res) => {
+  const n = await notify.send(req.user, { title: '🔔 WorkBook reminders are on', body: 'You’ll get a nudge 3 days before, the day before, and the morning of each test.', url: '/#/planner', tag: 'test' });
+  res.json({ sent: n });
+});
+
 // ---------- notebooks & pages ----------
 const publicPage = (p) => ({ ...p });
 app.get('/api/notebooks', auth, (req, res) => {
@@ -90,7 +111,7 @@ app.post('/api/notebooks', auth, (req, res) => {
   const { name, subject, color, pageCount, description } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   const d = store.db(req.user.id);
-  const nb = { id: store.uid(), name: name.trim().slice(0, 80), subject: (subject || '').trim().slice(0, 60), color: color || 'navy', pageCount: Math.max(1, Math.min(500, parseInt(pageCount) || 20)), description: (description || '').slice(0, 500), createdAt: Date.now(), updatedAt: Date.now() };
+  const nb = { id: store.uid(), name: name.trim().slice(0, 80), subject: (subject || '').trim().slice(0, 60), color: color || 'navy', pageCount: Math.max(0, Math.min(500, parseInt(pageCount) || 0)), description: (description || '').slice(0, 500), createdAt: Date.now(), updatedAt: Date.now() };
   d.notebooks.push(nb); store.save(req.user.id);
   res.json({ ...nb, scanned: 0 });
 });
@@ -109,7 +130,7 @@ app.patch('/api/notebooks/:id', auth, (req, res) => {
   if (name) nb.name = String(name).trim().slice(0, 80);
   if (subject !== undefined) nb.subject = String(subject).trim().slice(0, 60);
   if (color) nb.color = color;
-  if (pageCount) nb.pageCount = Math.max(1, Math.min(500, parseInt(pageCount) || nb.pageCount));
+  if (pageCount !== undefined) nb.pageCount = Math.max(0, Math.min(500, parseInt(pageCount) || 0));
   if (description !== undefined) nb.description = String(description).slice(0, 500);
   nb.updatedAt = Date.now(); store.save(req.user.id);
   res.json(nb);
@@ -141,9 +162,19 @@ app.post('/api/notebooks/:id/pages', auth, async (req, res) => {
     if (thumb) await store.saveImage(req.user.id, page.id, 'thumb', thumb);
   } catch (e) { console.error('save image:', e.message); return res.status(400).json({ error: e.message }); }
   d.pages.push(page); nb.updatedAt = Date.now();
-  if (idx > nb.pageCount) nb.pageCount = idx;
   store.save(req.user.id);
   res.json(publicPage(page));
+});
+app.post('/api/notebooks/:id/reorder', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const nb = d.notebooks.find(n => n.id === req.params.id);
+  if (!nb) return res.status(404).json({ error: 'Not found' });
+  const ids = Array.isArray(req.body.pageIds) ? req.body.pageIds : [];
+  const pages = d.pages.filter(p => p.notebookId === nb.id);
+  const ordered = [...ids.map(id => pages.find(p => p.id === id)).filter(Boolean), ...pages.filter(p => !ids.includes(p.id)).sort((a, b) => a.index - b.index)];
+  ordered.forEach((p, i) => { p.index = i + 1; });
+  nb.updatedAt = Date.now(); store.save(req.user.id);
+  res.json({ ok: true, pages: ordered.map(p => ({ id: p.id, index: p.index })) });
 });
 app.get('/api/pages/:id', auth, (req, res) => {
   const d = store.db(req.user.id);
@@ -171,8 +202,12 @@ app.patch('/api/pages/:id', auth, async (req, res) => {
   const d = store.db(req.user.id);
   const p = d.pages.find(p => p.id === req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
-  const { title, transcript, keyPoints, vocab, index, enhanced, filter } = req.body || {};
+  const { title, transcript, keyPoints, vocab, index, enhanced, thumb, filter, notebookId, suggestions, figures } = req.body || {};
   if (title !== undefined) p.title = String(title).slice(0, 120);
+  if (Array.isArray(suggestions)) p.suggestions = suggestions.slice(0, 8);
+  if (Array.isArray(figures)) p.figures = figures.slice(0, 12);
+  if (notebookId && d.notebooks.find(n => n.id === notebookId) && notebookId !== p.notebookId) { p.notebookId = notebookId; p.index = d.pages.filter(x => x.notebookId === notebookId).reduce((m, x) => Math.max(m, x.index), 0) + 1; }
+  if (thumb) await store.saveImage(req.user.id, p.id, 'thumb', thumb);
   if (transcript !== undefined) p.transcript = String(transcript);
   if (Array.isArray(keyPoints)) p.keyPoints = keyPoints;
   if (Array.isArray(vocab)) p.vocab = vocab;
@@ -186,8 +221,16 @@ app.delete('/api/pages/:id', auth, async (req, res) => {
   const i = d.pages.findIndex(p => p.id === req.params.id);
   if (i < 0) return res.status(404).json({ error: 'Not found' });
   await store.deleteImages(req.user.id, d.pages[i].id).catch(() => {});
-  d.pages.splice(i, 1); store.save(req.user.id);
+  const nbId = d.pages[i].notebookId;
+  d.pages.splice(i, 1);
+  d.pages.filter(p => p.notebookId === nbId).sort((a, b) => a.index - b.index).forEach((p, k) => { p.index = k + 1; });
+  store.save(req.user.id);
   res.json({ ok: true });
+});
+app.get('/api/recent', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const n = Math.min(30, parseInt(req.query.n) || 10);
+  res.json(d.pages.slice().sort((a, b) => b.createdAt - a.createdAt).slice(0, n).map(p => { const nb = d.notebooks.find(x => x.id === p.notebookId); return { id: p.id, index: p.index, title: p.title, status: p.status, createdAt: p.createdAt, rev: p.rev || 0, notebookId: p.notebookId, notebook: nb?.name || '', color: nb?.color || 'navy' }; }));
 });
 app.get('/api/search', auth, (req, res) => {
   const q = String(req.query.q || '').toLowerCase().trim();
@@ -242,6 +285,8 @@ app.post('/api/pages/:id/analyze', auth, async (req, res) => {
   const data = (await store.readImageBase64(req.user.id, p.id, 'enh')) || (await store.readImageBase64(req.user.id, p.id, 'orig'));
   if (!data) return res.status(400).json({ error: 'No image' });
   p.status = 'analyzing'; store.save(req.user.id);
+  const today = new Date(); const todayISO = today.toISOString().slice(0, 10);
+  const dow = today.toLocaleDateString('en-US', { weekday: 'long' });
   try {
     const out = await ai.completeJSON({
       system: `You are an expert at reading students' handwritten and printed school notes (any subject: math, science, history, English, languages) and turning them into clean digital notes. Notebook: "${nb?.name || ''}" (subject: ${nb?.subject || 'unknown'}).\n${MATH_RULES}`,
@@ -249,16 +294,19 @@ app.post('/api/pages/:id/analyze', auth, async (req, res) => {
       prompt: `Read this notebook page carefully — every line, including margins, boxes, arrows, and small notes. Then transcribe it into clean, well-organized Markdown that keeps the student's structure (headings, bullets, numbered steps, definitions, worked examples, formulas, tables). Rules:
 - Be FAITHFUL: transcribe what is written; fix obvious spelling slips but do NOT add new content that isn't on the page.
 - Follow the MATH & SYMBOL NOTATION rules exactly (fractions, repeating decimals, exponents, ×/÷, ≥, π, angles, degrees…). Every equation, fraction and formula must be LaTeX.
-- Keep the student's color/emphasis cues: things circled, boxed, starred, underlined or written in a different color are important → **bold** them (and keep ★ / ✓ marks). If a colored heading or label is used as a category (e.g. red = "test", green = "plants only"), keep it as its own line/heading.
-- Diagrams/drawings/graphs → short *italic* description in place.
+- Keep the student's color/emphasis cues: circled, boxed, starred, underlined or differently-colored items are important → **bold** them (keep ★ / ✓ marks). If a colored heading or label is used as a category, keep it as its own line/heading.
+- PICTURES: if the page has drawings, diagrams, maps, graphs, charts, sketches or glued-in pictures, DO NOT describe them in words only — list each one in "figures" with a bounding box, and put the placeholder [[figure:N]] (N = 1-based index) in the transcript exactly where it appears, optionally followed by the student's caption. Boxes are fractions of the image width/height [x, y, w, h] measured on the image as given; add a little margin so nothing is cut off. Text-only pages have an empty figures list.
+- DATES & TASKS: if the page mentions a test, quiz, exam, homework, project, due date or "study for…" (e.g. "TEST FRI", "quiz Thursday", "due 10/3", "HW p.42 tomorrow"), list each in "suggestions". Resolve relative days to real dates: today is ${dow} ${todayISO}; if the page itself is dated (e.g. "Sept 14"), resolve relative to that date. Dates must be in the FUTURE (this school year) — never a past year. If you can't resolve a date, leave "date" null but keep the text.
 - If part is unreadable, write [unclear]. If the page is upside-down/sideways, still read it correctly.
 Then return ONLY JSON:
 {
  "title": "short title for this page (max 8 words)",
- "transcript": "the markdown transcript",
+ "transcript": "the markdown transcript (with [[figure:N]] placeholders where pictures are)",
  "keyPoints": ["3-7 most important facts/ideas/formulas on this page (LaTeX for math)"],
- "vocab": [{"term":"...","definition":"..."}],   // key terms/formulas defined on the page (may be empty)
+ "vocab": [{"term":"...","definition":"..."}],
  "topics": ["1-4 short topic tags"],
+ "figures": [{"label":"short name, e.g. 'Map of Europe 1914' or 'Diagram of a plant cell'","box":[0.1,0.4,0.5,0.3],"kind":"diagram|map|graph|drawing|photo|table"}],
+ "suggestions": [{"title":"e.g. Ch. 5 Cell Test","type":"test|quiz|homework|project|reminder","date":"YYYY-MM-DD or null","dateText":"the words on the page, e.g. TEST FRI","notes":"what it says it covers"}],
  "readability": "good" | "fair" | "poor"
 }`,
       maxTokens: 6000, effort: 'medium',
@@ -268,6 +316,9 @@ Then return ONLY JSON:
     p.keyPoints = Array.isArray(out.keyPoints) ? out.keyPoints.map(String) : [];
     p.vocab = Array.isArray(out.vocab) ? out.vocab.filter(v => v && v.term).map(v => ({ term: String(v.term), definition: String(v.definition || '') })) : [];
     p.topics = Array.isArray(out.topics) ? out.topics.map(String) : [];
+    p.figures = Array.isArray(out.figures) ? out.figures.filter(f => f && Array.isArray(f.box) && f.box.length === 4).map(f => { let [x, y, w, h] = f.box.map(Number); x = Math.max(0, Math.min(1, x)); y = Math.max(0, Math.min(1, y)); w = Math.max(0.04, Math.min(1 - x, w)); h = Math.max(0.04, Math.min(1 - y, h)); return { label: String(f.label || 'Figure'), kind: String(f.kind || 'drawing'), box: [x, y, w, h] }; }).slice(0, 12) : [];
+    const oldSug = Array.isArray(p.suggestions) ? p.suggestions : [];
+    p.suggestions = Array.isArray(out.suggestions) ? out.suggestions.filter(sg => sg && sg.title).slice(0, 8).map(sg => { const prev = oldSug.find(o => o.title === sg.title); return { title: String(sg.title).slice(0, 120), type: ['test', 'quiz', 'homework', 'project', 'reminder'].includes(sg.type) ? sg.type : 'test', date: (() => { let dt = /^\d{4}-\d{2}-\d{2}$/.test(String(sg.date || '')) ? sg.date : null; if (dt && dt < todayISO) { let y = +dt.slice(0, 4); while (dt < todayISO && y < +todayISO.slice(0, 4) + 2) { y++; dt = y + dt.slice(4); } } return dt; })(), dateText: String(sg.dateText || ''), notes: String(sg.notes || '').slice(0, 500), done: !!prev?.done }; }) : [];
     p.readability = out.readability || '';
     p.status = 'ready';
     store.save(req.user.id);
@@ -277,6 +328,47 @@ Then return ONLY JSON:
     console.error('analyze:', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ---------- homework checker: vision extracts each problem + the student's answer, best text model verifies ----------
+app.post('/api/pages/:id/check', auth, async (req, res) => {
+  const d = store.db(req.user.id);
+  const p = d.pages.find(p => p.id === req.params.id);
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  const nb = d.notebooks.find(n => n.id === p.notebookId);
+  const data = (await store.readImageBase64(req.user.id, p.id, 'enh')) || (await store.readImageBase64(req.user.id, p.id, 'orig'));
+  if (!data) return res.status(400).json({ error: 'No image' });
+  const hint = String(req.body.hint || '').slice(0, 500);
+  try {
+    // stage 1 — read the homework: every problem and exactly what the student wrote
+    const ext = await ai.completeJSON({
+      system: `You read students' homework pages precisely. Subject: ${nb?.subject || 'unknown'}. Output ONLY JSON.\n${MATH_RULES}`,
+      images: [{ mediaType: 'image/jpeg', data }],
+      prompt: `This is a student's homework/worksheet page. List EVERY problem or question on it, with the student's written answer and any work shown. Transcribe exactly what the student wrote (even if wrong). If a problem has no answer written, set studentAnswer to "". ${hint ? 'Context from the student: ' + hint : ''}
+Return ONLY JSON: {"subject":"...","assignment":"short name if visible","items":[{"n":"1a","problem":"the question/problem as written (LaTeX for math)","studentAnswer":"what they wrote (LaTeX for math)","work":"any steps shown, brief"}]}`,
+      maxTokens: 5000,
+    });
+    const items = (ext.items || []).slice(0, 60);
+    if (!items.length) throw new Error("I couldn't find any problems with answers on this page. Make sure the homework (with your answers) is in the photo.");
+    // stage 2 — check with the strongest reasoning model
+    const chk = await ai.completeJSON({
+      system: 'You are a meticulous, kind teacher checking homework. Solve each problem yourself first, then compare with the student\'s answer. Accept equivalent forms (3/4 = 0.75 = $\\\\frac{3}{4}$; unsimplified fractions only if the problem did not ask to simplify; different but correct wording). Output ONLY JSON.\n' + MATH_RULES,
+      prompt: `Check this homework. For each item decide: "correct", "partial" (right idea / small slip) or "wrong" (or "blank" if no answer). Give the correct answer, and for anything not fully correct explain the mistake in 1-2 friendly sentences and show the key step. Then give an overall score and 2-4 concrete tips on what to practice.
+Subject: ${ext.subject || nb?.subject || ''}${ext.assignment ? ' · ' + ext.assignment : ''}
+ITEMS:
+${JSON.stringify(items, null, 1)}
+Return ONLY JSON: {"items":[{"n":"1a","verdict":"correct|partial|wrong|blank","correctAnswer":"...","explanation":"... (empty if correct)"}],"score":{"correct":0,"partial":0,"wrong":0,"blank":0,"percent":0},"tips":["..."],"summary":"one encouraging sentence"}`,
+      maxTokens: 5000,
+    });
+    const byN = new Map((chk.items || []).map(c => [String(c.n), c]));
+    const merged = items.map(it => { const c = byN.get(String(it.n)) || {}; return { n: String(it.n), problem: it.problem, studentAnswer: it.studentAnswer, work: it.work || '', verdict: ['correct', 'partial', 'wrong', 'blank'].includes(c.verdict) ? c.verdict : (it.studentAnswer ? 'wrong' : 'blank'), correctAnswer: c.correctAnswer || '', explanation: c.explanation || '' }; });
+    const counts = { correct: 0, partial: 0, wrong: 0, blank: 0 };
+    for (const m of merged) counts[m.verdict]++;
+    const percent = merged.length ? Math.round(100 * (counts.correct + 0.5 * counts.partial) / merged.length) : 0;
+    p.homework = { items: merged, score: { ...counts, percent }, tips: Array.isArray(chk.tips) ? chk.tips.map(String).slice(0, 6) : [], summary: String(chk.summary || ''), assignment: String(ext.assignment || ''), checkedAt: Date.now() };
+    store.save(req.user.id);
+    res.json(p.homework);
+  } catch (e) { console.error('check:', e.message); res.status(500).json({ error: e.message }); }
 });
 
 // ---------- planner ----------
@@ -529,7 +621,8 @@ app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, 'publi
 app.get('/api/health', (req, res) => res.json({ ok: true, storage: store.backendName(), ai: ai.AVAILABLE ? ai.BACKEND + ': ' + ai.modelLabel() : 'unconfigured' }));
 
 const PORT = process.env.PORT || 4980;
-store.init().then(() => {
+store.init().then(async () => {
+  try { await notify.init(); } catch (e) { console.error('notify init failed:', e.message); }
   app.listen(PORT, () => console.log(`Digital WorkBook running at http://localhost:${PORT}  (AI: ${ai.AVAILABLE ? ai.BACKEND : 'NOT CONFIGURED'})`));
 }).catch(e => { console.error('Storage init failed:', e); process.exit(1); });
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, async () => { try { await store.flushAll(); } catch {} process.exit(0); });
