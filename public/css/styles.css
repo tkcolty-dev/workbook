@@ -665,3 +665,11 @@ kbd { font-family: inherit; font-size: 11px; background: var(--line-2); border: 
 .link-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .test-styles { grid-template-columns: 1fr 1fr 1fr; }
 @media (max-width: 900px) { .test-styles { grid-template-columns: 1fr; } }
+
+/* mobile overflow guards */
+.grid > *, .hero > *, .viewer > *, .planner > *, .scan-wrap > * { min-width: 0; }
+.card { min-width: 0; }
+.recent-row, .nb-row, .prow, .event-row { min-width: 0; }
+#app { overflow-x: clip; }
+.page-head > .btn-row { flex-wrap: wrap; }
+@media (max-width: 860px) { .page-head { flex-direction: column; align-items: stretch; } .page-head .btn-row .btn { flex: 1; } }

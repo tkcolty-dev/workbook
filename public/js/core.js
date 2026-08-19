@@ -162,6 +162,7 @@ export function toast(msg, kind = '') {
   $('#toasts').appendChild(t);
   setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, kind === 'err' ? 5000 : 2600);
 }
+window.addEventListener('hashchange', () => { $$('.modal-bg').forEach(m => { if (!m.dataset.sticky) m.remove(); }); });
 export function modal(html, { wide = false, onClose } = {}) {
   const bg = h(`<div class="modal-bg"><div class="modal ${wide ? 'wide' : ''}">${html}</div></div>`);
   const close = () => { bg.remove(); document.removeEventListener('keydown', esc_); onClose && onClose(); };
