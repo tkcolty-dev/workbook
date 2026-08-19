@@ -1,5 +1,5 @@
 import { state, api, $, $$, esc, h, render, md, mdi, mdPage, hydrateFigures, plain, icon, logoSvg, toast, modal, confirm, busy, todayISO, fmtDate, fmtTime, countdown, daysUntil, ago, TYPES, COLORS, MON, DOW, MONTHS, parseISO, loadNotebooks, loadEvents, loadStudy, invalidate, route, go, dispatch } from './core.js';
-import { scanView, openAdjust } from './scan.js';
+import { scanView, openAdjust, captureModal } from './scan.js';
 import { studyListView, studyView, openNewStudy, testOnPage } from './study.js';
 import { bookView } from './book.js';
 import { registerSW, pushStatus, enablePush, disablePush, testPush, isIOS, isStandalone, pushSupported } from './push.js';
@@ -345,7 +345,7 @@ async function plannerView(_, q) {
     const listDate = selected ? (byDate[selected] || []) : null;
     const week = []; for (let i = 0; i < 7; i++) { const d = new Date(); d.setDate(d.getDate() + i); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; week.push({ d, iso, list: (byDate[iso] || []).filter(e => !e.done) }); }
     const agendaDays = []; for (let i = 0; i < 30; i++) { const d = new Date(); d.setDate(d.getDate() + i); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; if (byDate[iso]?.length) agendaDays.push({ iso, list: byDate[iso] }); }
-    main.innerHTML = `<div class="page-head"><div><h1>Planner</h1><div class="sub">Tests, quizzes, homework and due dates — typed, scanned from your paper planner, or spotted on your notes.</div></div><div class="btn-row"><label class="btn filebtn">${icon('camera')} Scan my planner<input type="file" accept="image/*" id="planScan" multiple></label><button class="btn primary" id="newEv">${icon('plus')} Add</button></div></div>
+    main.innerHTML = `<div class="page-head"><div><h1>Planner</h1><div class="sub">Tests, quizzes, homework and due dates — typed, scanned from your paper planner, or spotted on your notes.</div></div><div class="btn-row"><button class="btn" id="planScan">${icon('camera')} Scan my planner</button><button class="btn primary" id="newEv">${icon('plus')} Add</button></div></div>
       <div class="quick-add"><span>✨</span><input class="input" id="quickAdd" placeholder="Quick add: “math test friday”, “science hw p.42 due tue”, “history project oct 3”…"><button class="btn primary sm" id="quickGo">Add</button></div>
       <div class="week-strip">${week.map(w => `<button class="ws ${w.iso === today ? 'today' : ''} ${w.iso === selected ? 'sel' : ''}" data-iso="${w.iso}"><span class="wd">${DOW[w.d.getDay()]}</span><b>${w.d.getDate()}</b><span class="dots">${w.list.slice(0, 4).map(e => `<i class="t-${esc(e.type)}"></i>`).join('')}</span>${w.list.length ? `<span class="cnt">${w.list.length}</span>` : ''}</button>`).join('')}</div>
       <div class="btn-row" style="margin:10px 0"><div class="seg"><button id="vMonth" class="${view === 'month' ? 'active' : ''}">Month</button><button id="vAgenda" class="${view === 'agenda' ? 'active' : ''}">Agenda</button></div></div>
@@ -367,18 +367,18 @@ async function plannerView(_, q) {
     $$('.cal .day, .week-strip .ws').forEach(d => d.onclick = () => { selected = d.dataset.iso; draw(); });
     $('#quickAdd').onkeydown = (e) => { if (e.key === 'Enter') $('#quickGo').click(); };
     $('#quickGo').onclick = async () => { const t = $('#quickAdd').value.trim(); if (!t) return; busy($('#quickGo'), true, '…'); try { const ev = await api('/planner/parse', { body: { text: t } }); eventModal(null, ev.date, { title: ev.title, type: ev.type, subject: ev.subject, notes: ev.notes }); $('#quickAdd').value = ''; } catch (e) { toast(e.message, 'err'); } busy($('#quickGo'), false); };
-    $('#planScan').onchange = async (e) => { const files = [...e.target.files]; if (!files.length) return; e.target.value = ''; scanPlanner(files); };
+    $('#planScan').onclick = async () => { const shots = await captureModal({ title: '📷 Scan my planner', hint: 'Snap your planner, agenda, syllabus or the board — one photo per page. The AI pulls out every assignment, test and due date.' }); if (shots.length) scanPlanner(shots); };
     wireEventRows(main);
   };
   draw();
   if (q.new) eventModal(null, q.date || today);
 }
 // Scan a paper planner / syllabus: AI extracts every dated item → review → add selected.
-async function scanPlanner(files) {
-  const { fileToCanvas, scaleCanvas, toDataURL } = await import('./imageproc.js');
-  const m = modal(`<h2>📷 Reading your planner…</h2><div class="ai-status"><span class="spinner"></span> Finding every assignment, test and due date (${files.length} photo${files.length === 1 ? '' : 's'})…</div>`);
+async function scanPlanner(shots) {
+  const { scaleCanvas, toDataURL } = await import('./imageproc.js');
+  const m = modal(`<h2>📷 Reading your planner…</h2><div class="ai-status"><span class="spinner"></span> Finding every assignment, test and due date (${shots.length} photo${shots.length === 1 ? '' : 's'})…</div>`);
   let items = [];
-  for (const f of files) { try { const c = await fileToCanvas(f, 2000); const r = await api('/planner/extract', { body: { image: toDataURL(scaleCanvas(c, 1600), 0.85) } }); items.push(...r.items); } catch (e) { toast(e.message, 'err'); } }
+  for (const c of shots) { try { const r = await api('/planner/extract', { body: { image: toDataURL(scaleCanvas(c, 1600), 0.85) } }); items.push(...r.items); } catch (e) { toast(e.message, 'err'); } }
   m.close();
   if (!items.length) return toast("Couldn't find any dated items in that photo. Try a closer, straight-on photo.", 'err');
   const mm = modal(`<h2>Found ${items.length} item${items.length === 1 ? '' : 's'}</h2><p class="muted small" style="margin:-6px 0 10px">Check the ones to add. Fix a date or title right here if the AI got it wrong.</p>

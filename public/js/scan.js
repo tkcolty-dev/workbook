@@ -256,3 +256,34 @@ export async function openAdjust(it, onSaved) {
     } catch (e) { toast(e.message, 'err'); busy($('#apply', el), false); }
   };
 }
+
+// ---------- reusable camera modal (used by Planner "Scan my planner") ----------
+// Resolves with an array of canvases (one per snap/upload) when the user taps Done, or [] if cancelled.
+export function captureModal({ title = 'Take a photo', hint = 'Line up the page and snap. You can take several.', multi = true } = {}) {
+  return new Promise(async (resolve) => {
+    const shots = [];
+    let localStream = null;
+    const m = modal(`<h2>${esc(title)}</h2><p class="muted small" style="margin:-6px 0 10px">${esc(hint)}</p>
+      <div class="scan-stage" id="cmStage" style="min-height:300px"><div class="noCam"><span class="spinner light"></span></div></div>
+      <div class="shutter-bar" id="cmBar"></div>
+      <div class="tray-items" id="cmShots"></div>
+      <div class="actions"><button class="btn" id="cmCancel">Cancel</button><button class="btn primary" id="cmDone" disabled>${icon('check')} Use ${multi ? 'these photos' : 'this photo'}</button></div>`, { wide: true, onClose: () => { if (localStream) localStream.getTracks().forEach(t => t.stop()); } });
+    const el = m.el; const stage = $('#cmStage', el), bar = $('#cmBar', el);
+    const drawShots = () => { $('#cmShots', el).innerHTML = shots.map((c, i) => `<div class="tray-item" style="width:90px"><div class="ti-img" style="background-image:url('${toDataURL(scaleCanvas(c, 200), 0.6)}')"></div><button class="btn sm ghost rm" data-i="${i}">${icon('trash')}</button></div>`).join(''); $$('.rm', el).forEach(b => b.onclick = () => { shots.splice(+b.dataset.i, 1); drawShots(); }); $('#cmDone', el).disabled = !shots.length; };
+    const fileBtn = (label, capture) => `<label class="btn filebtn ${capture ? 'primary lg' : ''}">${icon(capture ? 'camera' : 'upload')} ${label}<input type="file" accept="image/*" ${capture ? 'capture="environment"' : 'multiple'}></label>`;
+    const wire = () => $$('input[type=file]', bar).forEach(inp => inp.onchange = async () => { for (const f of [...inp.files]) { try { shots.push(await fileToCanvas(f, 2400)); if (!multi) break; } catch {} } inp.value = ''; drawShots(); });
+    bar.innerHTML = `${fileBtn('Take photo', true)}${fileBtn('Upload')}`; wire();
+    const canLive = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext;
+    if (canLive) {
+      try {
+        localStream = await openCamera();
+        const video = h('<video autoplay playsinline muted></video>'); video.srcObject = localStream; video.play().catch(() => {});
+        stage.innerHTML = ''; stage.appendChild(video); stage.appendChild(h('<div class="guide"></div>'));
+        bar.innerHTML = `${fileBtn('Upload')}<button class="shutter" id="cmShot" title="Snap"></button>`; wire();
+        $('#cmShot', el).onclick = () => { if (!video.videoWidth) return; const f = h('<div class="snapflash"></div>'); stage.appendChild(f); setTimeout(() => f.remove(), 260); shots.push(bitmapToCanvas(video, 2400)); drawShots(); if (!multi) $('#cmDone', el).click(); };
+      } catch (e) { stage.innerHTML = `<div class="noCam"><div class="big">📷</div><b>Live camera didn’t start</b><div class="small" style="opacity:.85;margin-top:6px">${cameraHelp(e)}</div><div class="small" style="opacity:.75;margin-top:8px">Use “Take photo” below.</div></div>`; }
+    } else stage.innerHTML = `<div class="noCam"><div class="big">📷</div><b>Tap “Take photo” to use your camera</b></div>`;
+    $('#cmCancel', el).onclick = () => { m.close(); resolve([]); };
+    $('#cmDone', el).onclick = () => { m.close(); resolve(shots.slice()); };
+  });
+}
