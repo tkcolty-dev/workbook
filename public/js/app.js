@@ -466,9 +466,17 @@ route('/settings', settingsView);
 route('/progress', progressView);
 route('/s/:token', sharedView);
 
+// auto-update: when a new version is deployed, reload on the next navigation (never mid-scan)
+let BUILD = null;
+async function checkVersion() {
+  try { const r = await fetch('/api/version', { cache: 'no-store' }).then(r => r.json()); if (BUILD && r.v !== BUILD) { const busyScan = location.hash.startsWith('#/scan') && document.querySelector('.tray-item:not(.ready):not(.error)'); if (!busyScan) { toast('Updating to the newest WorkBook…'); setTimeout(() => location.reload(), 600); } } else if (!BUILD) BUILD = r.v; } catch {}
+}
 async function boot() {
-  try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; } catch {}
+  try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; BUILD = r.v || null; } catch {}
   registerSW();
+  setInterval(checkVersion, 90 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
+  window.addEventListener('hashchange', () => { if (Math.random() < 0.34) checkVersion(); });
   const guard = async () => {
     const hash = location.hash || '#/';
     if (!state.user && !/^#\/(login|register|s\/)/.test(hash)) { return authView(hash === '#/register' ? 'register' : 'login'); }
