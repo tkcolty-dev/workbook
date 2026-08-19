@@ -81,6 +81,34 @@ app.patch('/api/me', auth, (req, res) => {
   res.json({ user: store.users.public(req.user) });
 });
 
+// ---------- activity log (for progress & streaks) ----------
+function logActivity(userId, kind, n = 1) {
+  const d = store.db(userId); d.activity ||= {};
+  const day = new Date().toISOString().slice(0, 10);
+  d.activity[day] ||= {}; d.activity[day][kind] = (d.activity[day][kind] || 0) + n;
+  store.save(userId);
+}
+app.get('/api/progress', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const days = Object.keys(d.activity || {}).sort();
+  // streak: consecutive days with any activity ending today or yesterday
+  const today = new Date().toISOString().slice(0, 10);
+  const yest = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  let streak = 0; let best = 0, run = 0, prev = null;
+  const set = new Set(days);
+  let cur = set.has(today) ? today : set.has(yest) ? yest : null;
+  while (cur && set.has(cur)) { streak++; cur = new Date(Date.parse(cur) - 86400000).toISOString().slice(0, 10); }
+  for (const dd of days) { if (prev && Date.parse(dd) - Date.parse(prev) === 86400000) run++; else run = 1; best = Math.max(best, run); prev = dd; }
+  const tests = [];
+  for (const st of d.study) for (const t of st.tests || []) for (const a of t.attempts || []) tests.push({ at: a.at, percent: a.percent, subject: st.subject || '', set: st.title, test: t.title, setId: st.id });
+  tests.sort((a, b) => a.at - b.at);
+  const cards = d.study.reduce((acc, st) => { for (const c of st.cards || []) { acc.total++; if ((c.box || 0) >= 1) acc.known++; } return acc; }, { total: 0, known: 0 });
+  const bySubject = {};
+  for (const t of tests) { const k = t.subject || 'Other'; bySubject[k] ||= { n: 0, sum: 0, last: null }; bySubject[k].n++; bySubject[k].sum += t.percent; bySubject[k].last = t.percent; }
+  const upcoming = d.events.filter(e => !e.done && e.date >= today).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 5);
+  res.json({ activity: d.activity || {}, streak, best, tests: tests.slice(-60), cards, bySubject, pages: d.pages.length, notebooks: d.notebooks.length, upcoming });
+});
+
 // ---------- push reminders ----------
 app.get('/api/push/key', auth, (req, res) => res.json({ key: notify.publicKey(), subscribed: (req.user.push || []).length > 0, reminders: req.user.settings?.reminders || {} }));
 app.post('/api/push/subscribe', auth, (req, res) => {
@@ -96,9 +124,77 @@ app.delete('/api/push/subscribe', auth, (req, res) => {
   store.users.update(req.user, { push: endpoint ? (req.user.push || []).filter(s => s.subscription?.endpoint !== endpoint) : [] });
   res.json({ ok: true });
 });
+app.get('/api/sms/status', auth, (req, res) => res.json({ configured: notify.smsConfigured(), phone: req.user.settings?.sms?.phone || '', verified: !!req.user.settings?.sms?.verified, enabled: req.user.settings?.sms?.enabled !== false }));
+app.post('/api/sms/start', auth, async (req, res) => {
+  if (!notify.smsConfigured()) return res.status(400).json({ error: 'Text messages are not set up on this server yet (needs a Twilio account).' });
+  const phone = String(req.body.phone || '').replace(/[^\d+]/g, '');
+  if (!/^\+?\d{10,15}$/.test(phone)) return res.status(400).json({ error: 'Enter a phone number like +1 555 123 4567' });
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  store.users.update(req.user, { settings: { ...(req.user.settings || {}), tz: Number(req.body.tz) || 0, sms: { phone: phone.startsWith('+') ? phone : '+1' + phone, verified: false, enabled: true, code, codeAt: Date.now() } } });
+  try { await notify.sms(req.user.settings.sms.phone, `WorkBook code: ${code}`); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: 'Could not send: ' + e.message }); }
+});
+app.post('/api/sms/verify', auth, (req, res) => {
+  const sms = req.user.settings?.sms; const code = String(req.body.code || '');
+  if (!sms?.code || sms.code !== code || Date.now() - sms.codeAt > 15 * 60000) return res.status(400).json({ error: 'Wrong or expired code' });
+  store.users.update(req.user, { settings: { ...(req.user.settings || {}), sms: { ...sms, verified: true, code: null } } });
+  res.json({ ok: true });
+});
+app.post('/api/sms/toggle', auth, (req, res) => { const sms = req.user.settings?.sms || {}; store.users.update(req.user, { settings: { ...(req.user.settings || {}), sms: { ...sms, enabled: !!req.body.enabled } } }); res.json({ ok: true }); });
+app.delete('/api/sms', auth, (req, res) => { const st = { ...(req.user.settings || {}) }; delete st.sms; store.users.update(req.user, { settings: st }); res.json({ ok: true }); });
 app.post('/api/push/test', auth, async (req, res) => {
   const n = await notify.send(req.user, { title: '🔔 WorkBook reminders are on', body: 'You’ll get a nudge 3 days before, the day before, and the morning of each test.', url: '/#/planner', tag: 'test' });
   res.json({ sent: n });
+});
+
+// ---------- sharing (read-only links, no login needed) ----------
+function getShares() { return store.shares(); }
+app.post('/api/share', auth, (req, res) => {
+  const { kind, id } = req.body || {};
+  const d = store.db(req.user.id);
+  if (!(kind === 'notebook' && d.notebooks.find(n => n.id === id)) && !(kind === 'study' && d.study.find(x => x.id === id))) return res.status(404).json({ error: 'Not found' });
+  const shares = getShares();
+  let tok = Object.keys(shares).find(t => shares[t].userId === req.user.id && shares[t].kind === kind && shares[t].id === id);
+  if (!tok) { tok = crypto.randomBytes(9).toString('base64url'); shares[tok] = { userId: req.user.id, kind, id, createdAt: Date.now(), by: req.user.name || req.user.username }; store.saveShares(); }
+  res.json({ token: tok, url: `${req.protocol}://${req.get('host')}/#/s/${tok}` });
+});
+app.delete('/api/share/:token', auth, (req, res) => { const shares = getShares(); if (shares[req.params.token]?.userId === req.user.id) { delete shares[req.params.token]; store.saveShares(); } res.json({ ok: true }); });
+app.get('/api/shares', auth, (req, res) => { const shares = getShares(); res.json(Object.entries(shares).filter(([, v]) => v.userId === req.user.id).map(([token, v]) => ({ token, ...v }))); });
+function sharedCtx(req, res) {
+  const sh = getShares()[req.params.token];
+  if (!sh) { res.status(404).json({ error: 'This link is no longer valid' }); return null; }
+  return { sh, d: store.db(sh.userId) };
+}
+app.get('/api/shared/:token', (req, res) => {
+  const c = sharedCtx(req, res); if (!c) return;
+  const { sh, d } = c;
+  if (sh.kind === 'notebook') {
+    const nb = d.notebooks.find(n => n.id === sh.id); if (!nb) return res.status(404).json({ error: 'Gone' });
+    const pages = d.pages.filter(p => p.notebookId === nb.id).sort((a, b) => a.index - b.index).map(p => ({ id: p.id, index: p.index, title: p.title, transcript: p.transcript, keyPoints: p.keyPoints, vocab: p.vocab, figures: p.figures || [], rev: p.rev || 0 }));
+    return res.json({ kind: 'notebook', by: sh.by, notebook: { id: nb.id, name: nb.name, subject: nb.subject, color: nb.color, pages } });
+  }
+  const st = d.study.find(x => x.id === sh.id); if (!st) return res.status(404).json({ error: 'Gone' });
+  res.json({ kind: 'study', by: sh.by, study: { id: st.id, title: st.title, subject: st.subject, sheet: st.sheet, online: st.online, cards: (st.cards || []).map(c => ({ id: c.id, front: c.front, back: c.back, hint: c.hint })), tests: (st.tests || []).map(t => ({ id: t.id, title: t.title, description: t.description, style: t.style, questions: t.questions.map(q => ({ id: q.id, type: q.type, question: q.question, choices: q.choices, hint: q.hint })) })) } });
+});
+app.get('/api/shared/:token/image/:pageId', async (req, res) => {
+  const c = sharedCtx(req, res); if (!c) return;
+  const { sh, d } = c;
+  const p = d.pages.find(p => p.id === req.params.pageId && (sh.kind === 'notebook' ? p.notebookId === sh.id : (d.study.find(x => x.id === sh.id)?.pageIds || []).includes(p.id)));
+  if (!p) return res.status(404).end();
+  const kind = ['enh', 'thumb'].includes(req.query.kind) ? req.query.kind : 'enh';
+  const buf = await store.readImage(sh.userId, p.id, kind) || await store.readImage(sh.userId, p.id, 'enh');
+  if (!buf) return res.status(404).end();
+  res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'public, max-age=3600'); res.send(buf);
+});
+// a friend can take a shared practice test (graded, not saved)
+app.post('/api/shared/:token/grade/:tid', async (req, res) => {
+  const c = sharedCtx(req, res); if (!c) return;
+  const { sh, d } = c; if (sh.kind !== 'study') return res.status(400).json({ error: 'Not a study set' });
+  const st = d.study.find(x => x.id === sh.id); const test = st?.tests.find(t => t.id === req.params.tid);
+  if (!test) return res.status(404).json({ error: 'Test not found' });
+  req.body.dryRun = true; req.params.id = st.id;
+  // reuse the grading logic by faking the owner
+  req.user = store.users.byId(sh.userId);
+  return gradeHandler(req, res);
 });
 
 // ---------- notebooks & pages ----------
@@ -161,7 +257,7 @@ app.post('/api/notebooks/:id/pages', auth, async (req, res) => {
     if (original) await store.saveImage(req.user.id, page.id, 'orig', original);
     if (thumb) await store.saveImage(req.user.id, page.id, 'thumb', thumb);
   } catch (e) { console.error('save image:', e.message); return res.status(400).json({ error: e.message }); }
-  d.pages.push(page); nb.updatedAt = Date.now();
+  d.pages.push(page); nb.updatedAt = Date.now(); logActivity(req.user.id, 'scan');
   store.save(req.user.id);
   res.json(publicPage(page));
 });
@@ -371,6 +467,80 @@ Return ONLY JSON: {"items":[{"n":"1a","verdict":"correct|partial|wrong|blank","c
   } catch (e) { console.error('check:', e.message); res.status(500).json({ error: e.message }); }
 });
 
+// ---------- graded test → "fix what I missed" study set ----------
+app.post('/api/pages/:id/graded', auth, async (req, res) => {
+  const d = store.db(req.user.id);
+  const p = d.pages.find(p => p.id === req.params.id);
+  if (!p) return res.status(404).json({ error: 'Not found' });
+  const nb = d.notebooks.find(n => n.id === p.notebookId);
+  const data = (await store.readImageBase64(req.user.id, p.id, 'enh')) || (await store.readImageBase64(req.user.id, p.id, 'orig'));
+  if (!data) return res.status(400).json({ error: 'No image' });
+  try {
+    const ext = await ai.completeJSON({
+      system: `You read a student's returned, teacher-graded test or quiz precisely. Subject: ${nb?.subject || 'unknown'}. Output ONLY JSON.\n${MATH_RULES}`,
+      images: [{ mediaType: 'image/jpeg', data }],
+      prompt: `This is a graded test/quiz handed back by the teacher. Find the test name and score if visible. List every question with the student's answer and whether the TEACHER marked it wrong (✗, -1, circled, crossed out, red ink, a written correction) or right (✓, full points, untouched). For wrong ones include the teacher's correction if written and the concept being tested.
+Return ONLY JSON: {"testName":"...","score":"e.g. 17/20 or 85% or empty","items":[{"n":"3","question":"...","studentAnswer":"...","markedWrong":true,"correction":"teacher's correction or the right answer if clear","concept":"short concept name, e.g. 'adding fractions with unlike denominators'"}],"missedConcepts":["2-6 short concept names the student needs to fix"]}`,
+      maxTokens: 5000,
+    });
+    const items = ext.items || [];
+    const missed = items.filter(i => i.markedWrong);
+    if (!items.length) throw new Error("I couldn't find graded questions on this page — make sure the whole test with the teacher's marks is in the photo.");
+    const topic = `FIX-IT SET from a graded test${ext.testName ? ' "' + ext.testName + '"' : ''}${ext.score ? ' (score ' + ext.score + ')' : ''}. The student MISSED these (focus practice here): ${missed.map(m => `Q${m.n}: ${m.question} — answered "${m.studentAnswer}"${m.correction ? ', correct: ' + m.correction : ''} [concept: ${m.concept || '?'}]`).join(' | ') || 'nothing marked wrong'}. Concepts to fix: ${(ext.missedConcepts || []).join(', ')}.`;
+    const st = { id: store.uid(), title: `Fix: ${ext.testName || p.title || 'graded test'}`, subject: nb?.subject || '', topic, pageIds: [p.id], eventId: null, sheet: '', online: '', tests: [], cards: [], chat: [], graded: { testName: ext.testName || '', score: ext.score || '', items, missedConcepts: ext.missedConcepts || [] }, createdAt: Date.now(), updatedAt: Date.now() };
+    d.study.push(st); store.save(req.user.id);
+    res.json({ study: st, missed: missed.length, total: items.length });
+  } catch (e) { console.error('graded:', e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ---------- cram mode: one compact 20-minute plan ----------
+app.post('/api/study/:id/cram', auth, async (req, res) => {
+  const [d, s] = getStudy(req, res); if (!s) return;
+  try {
+    const out = await ai.completeJSON({
+      system: 'You are a study coach making a laser-focused last-minute review. Output ONLY JSON. Inside JSON strings, write math as LaTeX with $...$ (escape backslashes as \\\\).\n' + MATH_RULES,
+      prompt: `${studyContext(d, s)}\n\nThe test is SOON. Build a 20-minute cram plan with exactly: 6 "mustKnow" points (the highest-yield facts/formulas, one line each), 10 flashcards (hardest, most-tested material), and 5 "hardQuestions" (short-answer, the kind that separate A from B, with model answers and a one-line solution). Also 3 "traps" (common mistakes to avoid on this test).
+Return ONLY JSON: {"mustKnow":["..."],"cards":[{"front":"...","back":"..."}],"hardQuestions":[{"question":"...","answer":"...","why":"..."}],"traps":["..."]}`,
+      maxTokens: 5000,
+    });
+    s.cram = { mustKnow: (out.mustKnow || []).map(String).slice(0, 8), cards: (out.cards || []).filter(c => c && c.front).slice(0, 12), hardQuestions: (out.hardQuestions || []).filter(q => q && q.question).slice(0, 6), traps: (out.traps || []).map(String).slice(0, 5), createdAt: Date.now() };
+    s.updatedAt = Date.now(); store.save(req.user.id); logActivity(req.user.id, 'study');
+    res.json(s.cram);
+  } catch (e) { console.error('cram:', e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ---------- planner: AI extraction from a photo of a paper planner / syllabus, and natural-language quick add ----------
+app.post('/api/planner/extract', auth, async (req, res) => {
+  try {
+    const img = stripDataUrl(req.body.image);
+    const today = new Date(); const todayISO = today.toISOString().slice(0, 10); const dow = today.toLocaleDateString('en-US', { weekday: 'long' });
+    const out = await ai.completeJSON({
+      system: 'You read photos of student planners, agendas, syllabi, assignment sheets and whiteboards and extract every dated item. Output ONLY JSON.',
+      images: [img],
+      prompt: `Extract EVERY assignment, test, quiz, project, due date or event written on this page. Today is ${dow} ${todayISO}. Resolve days/dates to real dates in the FUTURE school year (if a date is written like 10/3 or "Fri" figure out the actual date; planners are usually laid out as a week — use the week's dates if shown). Keep titles short but specific (include the subject if it's written, e.g. "Math p.42 #1-20"). If no date can be determined, set date to null and include dateText.
+Return ONLY JSON: {"items":[{"title":"...","type":"test|quiz|homework|project|reminder","subject":"class/subject if visible or empty","date":"YYYY-MM-DD or null","dateText":"as written","notes":"extra details"}]}`,
+      maxTokens: 4000,
+    });
+    const items = (out.items || []).filter(i => i && i.title).slice(0, 40).map(i => ({ title: String(i.title).slice(0, 120), type: ['test', 'quiz', 'homework', 'project', 'reminder'].includes(i.type) ? i.type : 'homework', subject: String(i.subject || '').slice(0, 60), date: /^\d{4}-\d{2}-\d{2}$/.test(String(i.date || '')) ? i.date : null, dateText: String(i.dateText || ''), notes: String(i.notes || '').slice(0, 300) }));
+    res.json({ items });
+  } catch (e) { console.error('planner extract:', e.message); res.status(500).json({ error: e.message }); }
+});
+app.post('/api/planner/parse', auth, async (req, res) => {
+  try {
+    const text = String(req.body.text || '').slice(0, 300);
+    const today = new Date(); const todayISO = today.toISOString().slice(0, 10); const dow = today.toLocaleDateString('en-US', { weekday: 'long' });
+    const out = await ai.completeJSON({ system: 'You turn a short note into a planner item. Output ONLY JSON.', prompt: `Today is ${dow} ${todayISO}. Note: "${text}"\nReturn ONLY JSON: {"title":"short title","type":"test|quiz|homework|project|reminder","subject":"if mentioned","date":"YYYY-MM-DD (next occurrence in the future; default tomorrow if none)","time":"HH:MM or empty","notes":""}`, maxTokens: 300, effort: 'low' });
+    res.json({ title: String(out.title || text).slice(0, 120), type: ['test', 'quiz', 'homework', 'project', 'reminder'].includes(out.type) ? out.type : 'homework', subject: String(out.subject || ''), date: /^\d{4}-\d{2}-\d{2}$/.test(String(out.date || '')) ? out.date : new Date(Date.now() + 86400000).toISOString().slice(0, 10), time: /^\d{2}:\d{2}$/.test(String(out.time || '')) ? out.time : '', notes: String(out.notes || '') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/events/bulk', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const items = Array.isArray(req.body.items) ? req.body.items.slice(0, 60) : [];
+  const made = [];
+  for (const it of items) { if (!it.title || !it.date) continue; const ev = { id: store.uid(), title: String(it.title).slice(0, 120), type: it.type || 'homework', subject: String(it.subject || '').slice(0, 60), date: String(it.date).slice(0, 10), time: String(it.time || '').slice(0, 5), notes: String(it.notes || '').slice(0, 2000), notebookId: null, done: false, createdAt: Date.now() }; d.events.push(ev); made.push(ev); }
+  store.save(req.user.id); res.json({ added: made.length, events: made });
+});
+
 // ---------- planner ----------
 app.get('/api/events', auth, (req, res) => res.json(store.db(req.user.id).events.sort((a, b) => a.date.localeCompare(b.date))));
 app.post('/api/events', auth, (req, res) => {
@@ -398,16 +568,42 @@ function pagesText(d, pageIds) {
   const pages = d.pages.filter(p => pageIds.includes(p.id)).sort((a, b) => a.index - b.index);
   return pages.map(p => { const nb = d.notebooks.find(n => n.id === p.notebookId); return `### ${nb?.name || 'Notebook'} — page ${p.index}${p.title ? ': ' + p.title : ''}\n${p.transcript || '(no transcript yet)'}`; }).join('\n\n');
 }
+// fetch a web link's readable text (for study sources); cached on the study set
+async function fetchLinkText(url) {
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'Mozilla/5.0 (WorkBook study assistant)', Accept: 'text/html,text/plain,*/*' }, redirect: 'follow' });
+    const ct = r.headers.get('content-type') || '';
+    let text = await r.text();
+    let title = '';
+    if (/html/.test(ct) || /<html/i.test(text.slice(0, 2000))) {
+      title = (text.match(/<title[^>]*>([^<]*)<\/title>/i) || [])[1] || '';
+      text = text.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>|<nav[\s\S]*?<\/nav>|<footer[\s\S]*?<\/footer>|<!--[\s\S]*?-->/gi, ' ').replace(/<br\s*\/?>|<\/p>|<\/div>|<\/li>|<\/h\d>/gi, '\n').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    }
+    text = text.replace(/[ \t]+/g, ' ').replace(/\n\s*\n\s*/g, '\n').trim();
+    return { url, title: title.trim().slice(0, 140), text: text.slice(0, 9000), at: Date.now(), ok: true };
+  } catch (e) { return { url, title: '', text: '', at: Date.now(), ok: false, error: e.message }; }
+  finally { clearTimeout(t); }
+}
+async function ensureLinks(s) {
+  s.links = Array.isArray(s.links) ? s.links : [];
+  s.linkCache ||= {};
+  for (const url of s.links) if (!s.linkCache[url] || (!s.linkCache[url].ok && Date.now() - s.linkCache[url].at > 600000)) s.linkCache[url] = await fetchLinkText(url);
+  for (const k of Object.keys(s.linkCache)) if (!s.links.includes(k)) delete s.linkCache[k];
+}
+function linksText(s) { return (s.links || []).map(u => { const c = s.linkCache?.[u]; return c?.ok && c.text ? `--- WEB SOURCE: ${c.title || u} (${u}) ---\n${c.text}` : `--- WEB SOURCE (could not load): ${u} ---`; }).join('\n\n'); }
 function studyContext(d, s, pageIds) {
   const notes = pagesText(d, pageIds && pageIds.length ? pageIds : (s.pageIds || []));
-  return `SUBJECT: ${s.subject || 'unknown'}\nTOPIC / TEST: ${s.title}${s.topic ? '\nTOPIC DETAILS: ' + s.topic : ''}\n\nSTUDENT'S NOTEBOOK NOTES:\n${notes || '(no notebook pages selected — use the topic only)'}`;
+  const lt = linksText(s);
+  return `SUBJECT: ${s.subject || 'unknown'}\nTOPIC / TEST: ${s.title}${s.topic ? '\nTOPIC DETAILS: ' + s.topic : ''}\n\nSTUDENT'S NOTEBOOK NOTES:\n${notes || '(no notebook pages selected — use the topic' + (lt ? ' and the web sources' : '') + ')'}${lt ? '\n\nWEB SOURCES THE STUDENT ADDED (use these as material too):\n' + lt : ''}`;
 }
 app.get('/api/study', auth, (req, res) => res.json(store.db(req.user.id).study.map(s => ({ ...s, chat: undefined }))));
-app.post('/api/study', auth, (req, res) => {
-  const { title, subject, topic, pageIds, eventId } = req.body || {};
+app.post('/api/study', auth, async (req, res) => {
+  const { title, subject, topic, pageIds, eventId, links } = req.body || {};
   if (!title) return res.status(400).json({ error: 'Title required' });
   const d = store.db(req.user.id);
-  const s = { id: store.uid(), title: String(title).slice(0, 120), subject: String(subject || '').slice(0, 60), topic: String(topic || '').slice(0, 1000), pageIds: Array.isArray(pageIds) ? pageIds : [], eventId: eventId || null, sheet: '', online: '', tests: [], cards: [], chat: [], createdAt: Date.now(), updatedAt: Date.now() };
+  const s = { id: store.uid(), title: String(title).slice(0, 120), subject: String(subject || '').slice(0, 60), topic: String(topic || '').slice(0, 1000), pageIds: Array.isArray(pageIds) ? pageIds : [], eventId: eventId || null, sheet: '', online: '', tests: [], cards: [], chat: [], links: Array.isArray(links) ? links.map(u => String(u).trim()).filter(u => /^https?:\/\//i.test(u)).slice(0, 10) : [], createdAt: Date.now(), updatedAt: Date.now() };
+  if (s.links.length) await ensureLinks(s);
   d.study.push(s);
   if (eventId) { const ev = d.events.find(e => e.id === eventId); if (ev) ev.studyId = s.id; }
   store.save(req.user.id); res.json(s);
@@ -416,11 +612,13 @@ app.get('/api/study/:id', auth, (req, res) => {
   const s = store.db(req.user.id).study.find(s => s.id === req.params.id);
   s ? res.json(s) : res.status(404).json({ error: 'Not found' });
 });
-app.patch('/api/study/:id', auth, (req, res) => {
+app.patch('/api/study/:id', auth, async (req, res) => {
   const d = store.db(req.user.id);
   const s = d.study.find(s => s.id === req.params.id);
   if (!s) return res.status(404).json({ error: 'Not found' });
-  for (const k of ['title', 'subject', 'topic', 'pageIds', 'sheet', 'cards', 'cardProgress']) if (req.body[k] !== undefined) s[k] = req.body[k];
+  for (const k of ['title', 'subject', 'topic', 'pageIds', 'sheet', 'cards', 'cardProgress', 'cramDone']) if (req.body[k] !== undefined) s[k] = req.body[k];
+  if (Array.isArray(req.body.links)) { s.links = req.body.links.map(u => String(u).trim()).filter(u => /^https?:\/\//i.test(u)).slice(0, 10); await ensureLinks(s); }
+  if (req.body.cards) logActivity(req.user.id, 'cards');
   s.updatedAt = Date.now(); store.save(req.user.id); res.json(s);
 });
 app.delete('/api/study/:id', auth, (req, res) => {
@@ -447,7 +645,7 @@ app.post('/api/study/:id/sheet', auth, async (req, res) => {
 Keep it tight and high-quality — the kind of sheet a top student would make.`,
       maxTokens: 6000, effort: 'medium',
     });
-    s.sheet = text; s.updatedAt = Date.now(); store.save(req.user.id);
+    s.sheet = text; s.updatedAt = Date.now(); store.save(req.user.id); logActivity(req.user.id, 'study');
     res.json({ sheet: text });
   } catch (e) { console.error('sheet:', e.message); res.status(500).json({ error: e.message }); }
 });
@@ -501,16 +699,30 @@ app.post('/api/study/:id/test', auth, async (req, res) => {
   if (!types.length) types.push('mc', 'tf', 'short');
   const diffN = Math.max(1, Math.min(5, parseInt(req.body.difficulty) || 3));
   const difficulty = ['very easy (basic recall, friendly wording)', 'easy', 'medium / mixed', 'hard (multi-step, apply ideas)', 'very hard (tricky, exam-level, combine ideas)'][diffN - 1];
-  const style = req.body.style === 'remake' ? 'remake' : 'standard';
+  const style = ['remake', 'prompt'].includes(req.body.style) ? req.body.style : 'standard';
   const about = String(req.body.about || '').slice(0, 1000);
   const instructions = String(req.body.instructions || '').slice(0, 2000);
+  const freePrompt = String(req.body.prompt || '').slice(0, 3000);
+  if (Array.isArray(req.body.links) && req.body.links.length) { s.links = [...new Set([...(s.links || []), ...req.body.links.map(u => String(u).trim()).filter(u => /^https?:\/\//i.test(u))])].slice(0, 10); await ensureLinks(s); }
   const wantHints = req.body.hints !== false;
   const pageIds = Array.isArray(req.body.pageIds) ? req.body.pageIds.filter(id => (s.pageIds || []).includes(id)) : [];
   try {
     const seen = s.tests?.length ? 'Avoid repeating these earlier questions: ' + s.tests.flatMap(t => t.questions.map(q => q.question)).slice(-40).join(' | ') : '';
     const extra = `${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about : ''}${instructions ? '\nSTUDENT\'S INSTRUCTIONS FOR THIS TEST (follow them closely): ' + instructions : ''}`;
     const hintLine = wantHints ? '\nFor every question also give a "hint": one short nudge that helps without giving the answer away.' : '';
-    const prompt = style === 'remake'
+    const prompt = style === 'prompt'
+      ? `${studyContext(d, s, pageIds)}\n${extra}
+THE STUDENT'S REQUEST (build EXACTLY what they ask for — number of questions, topics, question types, difficulty, format, wording style; if they don't say, pick sensible defaults around ${count} questions): <<<${freePrompt || 'Make a good practice test on this material.'}>>>
+Allowed question types: ${Object.values(TYPE_DESC).join('; ')}.${hintLine} ${seen}
+Return ONLY JSON:
+{"title":"...","description":"1-2 sentences: what this test covers","questions":[
+ {"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why","hint":"..."},
+ {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why","hint":"..."},
+ {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"...","hint":"..."},
+ {"id":"q4","type":"fill","question":"... ____ ...","answer":"...","explanation":"...","hint":"..."},
+ {"id":"q5","type":"explain","question":"...","answer":"model answer","explanation":"rubric","hint":"..."}
+]}`
+      : style === 'remake'
       ? `${studyContext(d, s, pageIds)}\n${extra}
 Make a PRACTICE WORKSHEET that is a copy of the student's page(s) but with DIFFERENT NUMBERS / values / examples: keep the same kinds of problems, the same order and the same difficulty, and the same skills being practiced (e.g. if the page has "3/4 + 1/8", write "2/5 + 3/10"; if it has a definition to fill in, ask for a similar term from the same topic; if it has a worked example, give a fresh one to solve). Aim for about ${count} problems (fewer only if the page has fewer). Difficulty: ${difficulty}. Every problem is a short-answer question the student solves and types; give the exact model answer and a short solution/explanation.${hintLine} ${seen}
 Return ONLY JSON:
@@ -531,7 +743,7 @@ Return ONLY JSON:
       system: 'You are an expert teacher who writes fair, accurate practice tests and worksheets. Output ONLY JSON. Inside JSON strings, write math as LaTeX with $...$ (escape backslashes as \\\\ for valid JSON).\n' + MATH_RULES,
       prompt, maxTokens: 7000, effort: 'medium',
     });
-    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : ' Practice Test'), description: String(out.description || ''), style, about, instructions, difficulty: diffN, pageIds, questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1), type: style === 'remake' ? 'short' : (TYPE_DESC[q.type] ? q.type : 'short'), hint: wantHints ? String(q.hint || '') : '' })), createdAt: Date.now(), attempts: [] };
+    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : ' Practice Test'), description: String(out.description || ''), style, about, instructions, prompt: freePrompt, difficulty: diffN, pageIds, questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1), type: style === 'remake' ? 'short' : (TYPE_DESC[q.type] ? q.type : 'short'), hint: wantHints ? String(q.hint || '') : '' })), createdAt: Date.now(), attempts: [] };
     if (!test.questions.length) throw new Error('The AI returned no questions — try again');
     s.tests.push(test); s.updatedAt = Date.now(); store.save(req.user.id);
     res.json(test);
@@ -539,7 +751,7 @@ Return ONLY JSON:
 });
 
 const norm = (v) => String(v ?? '').toLowerCase().replace(/[$\\{}]/g, '').replace(/\s+/g, ' ').replace(/[.,;:!?]+$/, '').trim();
-app.post('/api/study/:id/test/:tid/grade', auth, async (req, res) => {
+async function gradeHandler(req, res) {
   const [d, s] = getStudy(req, res); if (!s) return;
   const test = s.tests.find(t => t.id === req.params.tid);
   if (!test) return res.status(404).json({ error: 'Test not found' });
@@ -571,10 +783,11 @@ app.post('/api/study/:id/test/:tid/grade', auth, async (req, res) => {
     let score = 0;
     for (const q of qs) { const r = results[q.id]; score += r.score !== undefined ? r.score : (r.correct ? 1 : 0); }
     const attempt = { id: store.uid(), at: Date.now(), answers, results, score, total, percent: total ? Math.round(100 * score / total) : 0, subset: only ? [...only] : null, timeSpent: req.body.timeSpent || null, mode: req.body.mode || 'exam' };
-    if (!dryRun) { test.attempts.push(attempt); s.updatedAt = Date.now(); store.save(req.user.id); }
+    if (!dryRun) { test.attempts.push(attempt); s.updatedAt = Date.now(); store.save(req.user.id); logActivity(req.user.id, 'test'); }
     res.json(attempt);
   } catch (e) { console.error('grade:', e.message); res.status(500).json({ error: e.message }); }
-});
+}
+app.post('/api/study/:id/test/:tid/grade', auth, gradeHandler);
 app.delete('/api/study/:id/test/:tid', auth, (req, res) => {
   const [d, s] = getStudy(req, res); if (!s) return;
   s.tests = s.tests.filter(t => t.id !== req.params.tid); store.save(req.user.id); res.json({ ok: true });

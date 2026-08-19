@@ -21,10 +21,9 @@ export async function scanView({ id }, q = {}) {
   let nbId = id || localStorage.getItem('dwb_last_nb') || nbs.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0]?.id || null;
   if (nbId && !nbs.find(n => n.id === nbId)) nbId = nbs[0]?.id || null;
   if (!nbId) {
-    main.innerHTML = `<div class="page-head"><div><h1>Scan</h1><div class="sub">Make a notebook to scan into — it only needs a name.</div></div></div>
-      <div class="empty"><div class="big">📓</div><h3>No notebooks yet</h3><p>Create one and start snapping pages. WorkBook crops, cleans and reads each page automatically.</p><button class="btn primary lg" id="mk">${icon('plus')} New notebook</button></div>`;
-    $('#mk').onclick = () => notebookModal(null, { then: (nb) => go('#/scan/' + nb.id) });
-    return;
+    // zero friction: first scan just creates "My Notebook" — rename it any time
+    const created = await api('/notebooks', { body: { name: 'My Notebook', subject: '', color: 'navy', pageCount: 0 } });
+    invalidate(); return go('#/scan/' + created.id);
   }
   if (!S || S.nbId !== nbId) S = { nbId, items: [], filter: localStorage.getItem('dwb_filter') || 'enhanced', boost: +(localStorage.getItem('dwb_boost') ?? 1) };
   S.nb = nbs.find(n => n.id === nbId); S.nbs = nbs;

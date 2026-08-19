@@ -3,10 +3,11 @@ import { scanView, openAdjust } from './scan.js';
 import { studyListView, studyView, openNewStudy, testOnPage } from './study.js';
 import { bookView } from './book.js';
 import { registerSW, pushStatus, enablePush, disablePush, testPush, isIOS, isStandalone, pushSupported } from './push.js';
+import { progressView, shareThing, sharedView, mountFocusTimer, toggleFocusTimer, smsSettingsHtml, wireSms } from './extras.js';
 
 // ---------- shell ----------
 const NAV = [
-  ['#/', 'home', 'Home'], ['#/notebooks', 'book', 'Notebooks'], ['#/scan', 'camera', 'Scan'], ['#/planner', 'calendar', 'Planner'], ['#/study', 'study', 'Study'],
+  ['#/', 'home', 'Home'], ['#/notebooks', 'book', 'Notebooks'], ['#/scan', 'camera', 'Scan'], ['#/planner', 'calendar', 'Planner'], ['#/study', 'study', 'Study'], ['#/progress', 'zap', 'Progress'],
 ];
 export function shell(active, content) {
   const u = state.user;
@@ -15,12 +16,15 @@ export function shell(active, content) {
     <aside class="sidebar">
       <a class="brand" href="#/" style="text-decoration:none;color:inherit">${logoSvg(36)}<div class="name">WorkBook<small>Digital Notebook</small></div></a>
       <nav class="nav">${NAV.map(([href, ic, label]) => `<a href="${href}" class="${active === label ? 'active' : ''}">${icon(ic)}${label}</a>`).join('')}</nav>
+      <button class="nav-btn" id="focusBtn" title="Focus timer (25/5)">⏱ Focus timer</button>
       <div class="spacer"></div>
       <a class="nav-a" href="#/settings" style="text-decoration:none"><div class="userbox"><div class="avatar">${esc(initials)}</div><div class="who"><b>${esc(u?.name || u?.username)}</b><span title="${esc(state.ai?.model || '')}">${state.ai?.available === false ? '⚠️ AI not set up' : state.ai?.mode === 'cli' ? 'AI: Claude (local)' : state.ai?.mode === 'anthropic' ? 'AI: Claude' : 'AI: ' + esc((state.ai?.model || '').split(' + ')[0])}</span></div>${icon('settings', 'muted')}</div></a>
     </aside>
     <main class="main">${state.ai?.available === false ? `<div class="ai-status" style="margin-bottom:14px;background:var(--amber-soft);color:#7a4d00">⚠️ AI features are switched off on this server (no API key). Scanning, notebooks and the planner work; AI reading, study sheets, tests and flashcards will be enabled once a key is added.</div>` : ''}${content}</main>
-    <nav class="tabbar">${NAV.map(([href, ic, label]) => label === 'Scan' ? `<a href="${href}" class="scan-tab ${active === label ? 'active' : ''}"><div class="ring">${icon(ic)}</div>Scan</a>` : `<a href="${href}" class="${active === label ? 'active' : ''}">${icon(ic)}${label}</a>`).join('')}</nav>
+    <nav class="tabbar">${NAV.filter(n => n[2] !== 'Progress').map(([href, ic, label]) => label === 'Scan' ? `<a href="${href}" class="scan-tab ${active === label ? 'active' : ''}"><div class="ring">${icon(ic)}</div>Scan</a>` : `<a href="${href}" class="${active === label ? 'active' : ''}">${icon(ic)}${label}</a>`).join('')}</nav>
   </div>`);
+  const fb = $('#focusBtn'); if (fb) fb.onclick = toggleFocusTimer;
+  mountFocusTimer();
   return $('.main');
 }
 export const nbCover = (nb, extra = '') => `<div class="nb-cover color-${esc(nb.color || 'navy')} ${extra}"><div class="rings"></div><div class="label"><b>${esc(nb.name)}</b><span>${esc(nb.subject || 'Notebook')}</span></div><div class="foot">${nb.pageCount ? `<div class="progress"><i style="width:${Math.min(100, Math.round(100 * (nb.scanned || 0) / nb.pageCount))}%"></i></div><span>${nb.scanned || 0}/${nb.pageCount}</span>` : `<span></span><span>${nb.scanned || 0} page${nb.scanned === 1 ? '' : 's'}</span>`}</div></div>`;
@@ -193,7 +197,7 @@ async function notebookView({ id }) {
     const shown = filter ? pages.filter(p => (p.title + ' ' + p.transcript).toLowerCase().includes(filter.toLowerCase())) : pages;
     main.innerHTML = `<div class="crumbs"><a href="#/notebooks">Notebooks</a> › <span>${esc(nb.name)}</span></div>
     <div class="page-head" style="margin-bottom:14px"><div><h1><span class="nb-dot big color-${esc(nb.color || 'navy')}" style="vertical-align:-2px;margin-right:8px"></span>${esc(nb.name)}</h1><div class="sub">${esc(nb.subject || 'Notebook')} · ${pages.length} page${pages.length === 1 ? '' : 's'}${nb.pageCount ? ` · goal ${nb.pageCount} (${Math.min(100, Math.round(100 * pages.length / nb.pageCount))}%)` : ''}</div></div>
-      <div class="btn-row"><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Scan more</a>${pages.length ? `<a class="btn" href="#/book/${nb.id}">▶ Slideshow</a><a class="btn" href="#/study?new=1&notebook=${nb.id}">${icon('study')} Study</a><button class="btn" id="printNb">${icon('print')} PDF</button>` : ''}<button class="btn icon" id="edit" title="Notebook settings">${icon('settings')}</button></div></div>
+      <div class="btn-row"><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Scan more</a>${pages.length ? `<a class="btn" href="#/book/${nb.id}">▶ Slideshow</a><a class="btn" href="#/study?new=1&notebook=${nb.id}">${icon('study')} Study</a><button class="btn" id="printNb">${icon('print')} PDF</button><button class="btn" id="shareNb">${icon('upload')} Share</button>` : ''}<button class="btn icon" id="edit" title="Notebook settings">${icon('settings')}</button></div></div>
     ${pages.length ? `<div class="list-tools"><div class="search-box">${icon('search')}<input class="input" id="pq" placeholder="Find in this notebook…" value="${esc(filter)}"></div><div class="btn-row">${selecting ? `<span class="muted small">${sel.size} selected</span><button class="btn sm" id="selAll">All</button><button class="btn sm danger" id="delSel" ${sel.size ? '' : 'disabled'}>${icon('trash')} Delete</button><button class="btn sm" id="moveSel" ${sel.size ? '' : 'disabled'}>Move to…</button><button class="btn sm" id="cancelSel">Done</button>` : `<button class="btn sm" id="selMode">Select</button>`}</div></div>
     <div class="page-list" id="plist">${shown.map(p => `<div class="prow ${sel.has(p.id) ? 'sel' : ''}" data-id="${p.id}" draggable="${selecting ? 'false' : 'true'}">
         ${selecting ? `<label class="pchk"><input type="checkbox" ${sel.has(p.id) ? 'checked' : ''}></label>` : `<div class="pnum">${p.index}</div>`}
@@ -205,6 +209,7 @@ async function notebookView({ id }) {
     <div class="muted small" style="margin-top:10px">Tip: drag pages to reorder · tap a page to open it · Select to delete or move several at once.</div>`
     : `<div class="empty"><div class="big">📷</div><h3>No pages yet</h3><p>Tap Scan more and snap the first page. WorkBook crops it, cleans it up and reads it — you just keep snapping.</p><a class="btn primary" href="#/scan/${nb.id}">${icon('camera')} Start scanning</a></div>`}`;
     $('#edit').onclick = () => notebookModal(nb);
+    const sb = $('#shareNb'); if (sb) sb.onclick = () => shareThing('notebook', nb.id, nb.name);
     const pb = $('#printNb'); if (pb) pb.onclick = () => printNotebook({ ...nb, pages });
     const pq = $('#pq'); if (pq) { pq.oninput = () => { filter = pq.value; const y = window.scrollY; draw(); $('#pq').focus(); $('#pq').setSelectionRange(filter.length, filter.length); window.scrollTo(0, y); }; }
     const sm = $('#selMode'); if (sm) sm.onclick = () => { selecting = true; sel.clear(); draw(); };
@@ -255,7 +260,7 @@ async function pageView({ id }) {
   const sugs = (page.suggestions || []).filter(s => !s.done);
   main.innerHTML = `<div class="crumbs"><a href="#/notebooks">Notebooks</a> › <a href="#/notebook/${nb.id}">${esc(nb.name)}</a> › <span>Page ${page.index}</span></div>
     <div class="page-head" style="margin-bottom:14px"><div><h1 id="ptitle" contenteditable="true" spellcheck="false" title="Click to rename" style="outline:none;border-bottom:1px dashed transparent">${esc(page.title || 'Page ' + page.index)}</h1><div class="sub">${esc(nb.name)} · page ${page.index} of ${nb.pages.length} · scanned ${ago(page.createdAt)}${page.readability ? ' · handwriting: ' + esc(page.readability) : ''}</div></div>
-      <div class="btn-row"><button class="btn primary" id="testThis">${icon('quiz')} Test on this</button><button class="btn" id="checkHw">${icon('check')} Check homework</button><button class="btn" id="adjust">${icon('edit')} Adjust</button><button class="btn" id="rerun">${icon('sparkle')} Re-read</button><a class="btn icon" href="/api/pages/${page.id}/image?kind=enh" download="${esc(nb.name)}-p${page.index}.jpg" title="Download">${icon('download')}</a><button class="btn icon danger" id="delp" title="Delete page">${icon('trash')}</button></div></div>
+      <div class="btn-row"><button class="btn primary" id="testThis">${icon('quiz')} Test on this</button><button class="btn" id="checkHw">${icon('check')} Check homework</button><button class="btn" id="gradedBtn" title="This is a test the teacher graded — make a fix-it study set from what I missed">📝 Graded test → fix it</button><button class="btn" id="adjust">${icon('edit')} Adjust</button><button class="btn" id="rerun">${icon('sparkle')} Re-read</button><a class="btn icon" href="/api/pages/${page.id}/image?kind=enh" download="${esc(nb.name)}-p${page.index}.jpg" title="Download">${icon('download')}</a><button class="btn icon danger" id="delp" title="Delete page">${icon('trash')}</button></div></div>
     ${sugs.length ? `<div class="card sug-card"><h3>📅 Spotted on this page</h3>${sugs.map((sg, k) => `<div class="sug-row"><div><b>${esc(sg.title)}</b> <span class="chip">${esc(TYPES[sg.type] || sg.type)}</span><div class="muted small">${sg.dateText ? '“' + esc(sg.dateText) + '” · ' : ''}${sg.date ? fmtDate(sg.date) + ' · ' + countdown(sg.date) : 'date unknown — pick one'}${sg.notes ? ' · ' + esc(sg.notes) : ''}</div></div><div class="btn-row"><button class="btn sm primary addSug" data-k="${k}">${icon('plus')} Add to planner</button><button class="btn sm ghost dismissSug" data-k="${k}">Dismiss</button></div></div>`).join('')}</div>` : ''}
     <div id="hwBox">${page.homework ? homeworkHtml(page.homework) : ''}</div>
     <div class="viewer">
@@ -281,6 +286,7 @@ async function pageView({ id }) {
   $('#ptitle').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); } };
   $('#testThis').onclick = () => testOnPage(page, nb);
   $('#checkHw').onclick = () => checkHomework(page, nb);
+  $('#gradedBtn').onclick = async () => { if (!(await confirm('Graded test?', 'AI will read the teacher’s marks on this page, find what you got wrong, and build a study set (flashcards + practice test) just for those.', { danger: false, ok: 'Build fix-it set' }))) return; const b = $('#gradedBtn'); busy(b, true, 'Reading the marks…'); try { const r = await api('/pages/' + page.id + '/graded', { body: {} }); invalidate(); toast(`Found ${r.missed} missed of ${r.total} — building your fix-it set`, 'ok'); sessionStorage.setItem('dwb_fixit', '1'); go('#/study/' + r.study.id + '?fixit=1'); } catch (e) { toast(e.message, 'err'); busy(b, false); } };
   wireHomework(page, nb);
   $('#adjust').onclick = () => openAdjust({ pageId: page.id, corners: null, filter: page.filter }, () => dispatch());
   $('#rerun').onclick = async () => { busy($('#rerun'), true, 'Reading…'); $('#tstatus').innerHTML = `<div class="ai-status"><span class="spinner"></span> AI is reading the page…</div>`; try { await api('/pages/' + page.id + '/analyze', { body: {} }); dispatch(); } catch (e) { toast(e.message, 'err'); busy($('#rerun'), false); $('#tstatus').innerHTML = ''; } };
@@ -327,7 +333,7 @@ async function plannerView(_, q) {
   const evs = await loadEvents(true);
   const today = todayISO();
   if (!calMonth) { const d = new Date(); calMonth = { y: d.getFullYear(), m: d.getMonth() }; }
-  let selected = q.date || null;
+  let selected = q.date || null; let view = localStorage.getItem('dwb_plan_view') || 'month';
   const draw = () => {
     const { y, m } = calMonth;
     const first = new Date(y, m, 1); const start = new Date(y, m, 1 - first.getDay());
@@ -337,27 +343,55 @@ async function plannerView(_, q) {
     const upcoming = evs.filter(e => !e.done && e.date >= today);
     const past = evs.filter(e => e.done || e.date < today).sort((a, b) => b.date.localeCompare(a.date));
     const listDate = selected ? (byDate[selected] || []) : null;
-    main.innerHTML = `<div class="page-head"><div><h1>Planner</h1><div class="sub">Tests, quizzes, homework and due dates. Tap a day to add something.</div></div><button class="btn primary" id="newEv">${icon('plus')} Add</button></div>
-      <div class="planner"><div class="card">
+    const week = []; for (let i = 0; i < 7; i++) { const d = new Date(); d.setDate(d.getDate() + i); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; week.push({ d, iso, list: (byDate[iso] || []).filter(e => !e.done) }); }
+    const agendaDays = []; for (let i = 0; i < 30; i++) { const d = new Date(); d.setDate(d.getDate() + i); const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; if (byDate[iso]?.length) agendaDays.push({ iso, list: byDate[iso] }); }
+    main.innerHTML = `<div class="page-head"><div><h1>Planner</h1><div class="sub">Tests, quizzes, homework and due dates — typed, scanned from your paper planner, or spotted on your notes.</div></div><div class="btn-row"><label class="btn filebtn">${icon('camera')} Scan my planner<input type="file" accept="image/*" id="planScan" multiple></label><button class="btn primary" id="newEv">${icon('plus')} Add</button></div></div>
+      <div class="quick-add"><span>✨</span><input class="input" id="quickAdd" placeholder="Quick add: “math test friday”, “science hw p.42 due tue”, “history project oct 3”…"><button class="btn primary sm" id="quickGo">Add</button></div>
+      <div class="week-strip">${week.map(w => `<button class="ws ${w.iso === today ? 'today' : ''} ${w.iso === selected ? 'sel' : ''}" data-iso="${w.iso}"><span class="wd">${DOW[w.d.getDay()]}</span><b>${w.d.getDate()}</b><span class="dots">${w.list.slice(0, 4).map(e => `<i class="t-${esc(e.type)}"></i>`).join('')}</span>${w.list.length ? `<span class="cnt">${w.list.length}</span>` : ''}</button>`).join('')}</div>
+      <div class="btn-row" style="margin:10px 0"><div class="seg"><button id="vMonth" class="${view === 'month' ? 'active' : ''}">Month</button><button id="vAgenda" class="${view === 'agenda' ? 'active' : ''}">Agenda</button></div></div>
+      <div class="planner">${view === 'month' ? `<div class="card">
         <div class="cal-head"><button class="btn icon ghost" id="pm">${icon('chevL')}</button><h2>${MONTHS[m]} ${y}</h2><div class="btn-row"><button class="btn sm ghost" id="tdy">Today</button><button class="btn icon ghost" id="nm">${icon('chevR')}</button></div></div>
-        <div class="cal">${DOW.map(d => `<div class="dow">${d}</div>`).join('')}${cells.map(c => { const list = byDate[c.iso] || []; return `<div class="day ${c.other ? 'other' : ''} ${c.iso === today ? 'today' : ''} ${c.iso === selected ? 'selected' : ''}" data-iso="${c.iso}"><span class="n">${c.d.getDate()}</span>${list.slice(0, 3).map(e => `<span class="ev ${esc(e.type)} ${e.done ? 'done' : ''}">${esc(e.title)}</span>`).join('')}${list.length > 3 ? `<span class="more">+${list.length - 3} more</span>` : ''}<div class="dots">${list.map(e => `<i class="t-${esc(e.type)}" style="background:var(--${e.type === 'test' ? 'red' : e.type === 'quiz' ? 'amber' : e.type === 'homework' ? 'accent' : e.type === 'project' ? 'purple' : e.type === 'reminder' ? 'green' : 'ink-3'})"></i>`).join('')}</div></div>`; }).join('')}</div>
+        <div class="cal">${DOW.map(d => `<div class="dow">${d}</div>`).join('')}${cells.map(c => { const list = byDate[c.iso] || []; return `<div class="day ${c.other ? 'other' : ''} ${c.iso === today ? 'today' : ''} ${c.iso === selected ? 'selected' : ''}" data-iso="${c.iso}"><span class="n">${c.d.getDate()}</span>${list.slice(0, 3).map(e => `<span class="ev ${esc(e.type)} ${e.done ? 'done' : ''}">${esc(e.title)}</span>`).join('')}${list.length > 3 ? `<span class="more">+${list.length - 3} more</span>` : ''}<div class="dots">${list.map(e => `<i class="t-${esc(e.type)}"></i>`).join('')}</div></div>`; }).join('')}</div>
         <div class="chips" style="margin-top:12px">${Object.entries(TYPES).map(([k, v]) => `<span class="chip"><span class="type-dot t-${k}"></span>${v}</span>`).join('')}</div>
-      </div>
+      </div>` : `<div class="card"><h3>Next 30 days</h3>${agendaDays.length ? agendaDays.map(g => `<div class="agenda-day"><div class="agenda-date ${g.iso === today ? 'today' : ''}">${g.iso === today ? 'Today · ' : ''}${fmtDate(g.iso)}</div>${g.list.map(eventRow).join('')}</div>`).join('') : '<p class="muted small">Nothing in the next 30 days. Add something above or scan your planner.</p>'}</div>`}
       <div>
         ${listDate ? `<div class="card" style="margin-bottom:16px"><div style="display:flex;justify-content:space-between;align-items:center"><h3>${fmtDate(selected, { year: true })}</h3><button class="btn sm" id="addOn">${icon('plus')} Add here</button></div>${listDate.length ? listDate.map(eventRow).join('') : '<p class="muted small" style="margin:8px 0 0">Nothing on this day.</p>'}</div>` : ''}
         <div class="card"><h3>Upcoming</h3>${upcoming.length ? upcoming.map(eventRow).join('') : '<p class="muted small">Nothing coming up. Add your next test!</p>'}</div>
         ${past.length ? `<div class="card" style="margin-top:16px"><h3 class="muted">Past & done</h3>${past.slice(0, 8).map(eventRow).join('')}</div>` : ''}
       </div></div>`;
-    $('#pm').onclick = () => { calMonth.m--; if (calMonth.m < 0) { calMonth.m = 11; calMonth.y--; } draw(); };
-    $('#nm').onclick = () => { calMonth.m++; if (calMonth.m > 11) { calMonth.m = 0; calMonth.y++; } draw(); };
-    $('#tdy').onclick = () => { const d = new Date(); calMonth = { y: d.getFullYear(), m: d.getMonth() }; selected = today; draw(); };
+    const pm = $('#pm'); if (pm) { pm.onclick = () => { calMonth.m--; if (calMonth.m < 0) { calMonth.m = 11; calMonth.y--; } draw(); }; $('#nm').onclick = () => { calMonth.m++; if (calMonth.m > 11) { calMonth.m = 0; calMonth.y++; } draw(); }; $('#tdy').onclick = () => { const d = new Date(); calMonth = { y: d.getFullYear(), m: d.getMonth() }; selected = today; draw(); }; }
+    $('#vMonth').onclick = () => { view = 'month'; localStorage.setItem('dwb_plan_view', view); draw(); };
+    $('#vAgenda').onclick = () => { view = 'agenda'; localStorage.setItem('dwb_plan_view', view); draw(); };
     $('#newEv').onclick = () => eventModal(null, selected || today);
     if ($('#addOn')) $('#addOn').onclick = () => eventModal(null, selected);
-    $$('.cal .day').forEach(d => d.onclick = () => { selected = d.dataset.iso; draw(); });
+    $$('.cal .day, .week-strip .ws').forEach(d => d.onclick = () => { selected = d.dataset.iso; draw(); });
+    $('#quickAdd').onkeydown = (e) => { if (e.key === 'Enter') $('#quickGo').click(); };
+    $('#quickGo').onclick = async () => { const t = $('#quickAdd').value.trim(); if (!t) return; busy($('#quickGo'), true, '…'); try { const ev = await api('/planner/parse', { body: { text: t } }); eventModal(null, ev.date, { title: ev.title, type: ev.type, subject: ev.subject, notes: ev.notes }); $('#quickAdd').value = ''; } catch (e) { toast(e.message, 'err'); } busy($('#quickGo'), false); };
+    $('#planScan').onchange = async (e) => { const files = [...e.target.files]; if (!files.length) return; e.target.value = ''; scanPlanner(files); };
     wireEventRows(main);
   };
   draw();
   if (q.new) eventModal(null, q.date || today);
+}
+// Scan a paper planner / syllabus: AI extracts every dated item → review → add selected.
+async function scanPlanner(files) {
+  const { fileToCanvas, scaleCanvas, toDataURL } = await import('./imageproc.js');
+  const m = modal(`<h2>📷 Reading your planner…</h2><div class="ai-status"><span class="spinner"></span> Finding every assignment, test and due date (${files.length} photo${files.length === 1 ? '' : 's'})…</div>`);
+  let items = [];
+  for (const f of files) { try { const c = await fileToCanvas(f, 2000); const r = await api('/planner/extract', { body: { image: toDataURL(scaleCanvas(c, 1600), 0.85) } }); items.push(...r.items); } catch (e) { toast(e.message, 'err'); } }
+  m.close();
+  if (!items.length) return toast("Couldn't find any dated items in that photo. Try a closer, straight-on photo.", 'err');
+  const mm = modal(`<h2>Found ${items.length} item${items.length === 1 ? '' : 's'}</h2><p class="muted small" style="margin:-6px 0 10px">Check the ones to add. Fix a date or title right here if the AI got it wrong.</p>
+    <div class="plan-review">${items.map((it, i) => `<div class="pr-row"><input type="checkbox" class="prc" data-i="${i}" ${it.date ? 'checked' : ''}><input class="input prt" data-i="${i}" value="${esc(it.title)}"><select class="prk" data-i="${i}">${Object.entries(TYPES).filter(([k]) => k !== 'other').map(([k, v]) => `<option value="${k}" ${it.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select><input type="date" class="prd" data-i="${i}" value="${it.date || ''}" title="${esc(it.dateText || '')}"></div>${!it.date ? `<div class="small muted" style="margin:-4px 0 6px 28px">Date unclear (“${esc(it.dateText || '?')}”) — pick one to include it</div>` : ''}`).join('')}</div>
+    <div class="actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="addAll">${icon('plus')} Add selected</button></div>`, { wide: true });
+  $('#addAll', mm.el).onclick = async () => {
+    const picked = [];
+    $$('.prc', mm.el).forEach(c => { if (!c.checked) return; const i = +c.dataset.i; const date = $(`.prd[data-i="${i}"]`, mm.el).value; if (!date) return; picked.push({ ...items[i], title: $(`.prt[data-i="${i}"]`, mm.el).value.trim() || items[i].title, type: $(`.prk[data-i="${i}"]`, mm.el).value, date }); });
+    if (!picked.length) return toast('Pick at least one item with a date', 'err');
+    busy($('#addAll', mm.el), true, 'Adding…');
+    const r = await api('/events/bulk', { body: { items: picked } });
+    invalidate(); mm.close(); toast(`Added ${r.added} to your planner 🎉`, 'ok'); dispatch(); nudgeReminders();
+  };
 }
 export async function eventModal(ev, date, pre = {}) {
   const isNew = !ev; ev = ev || { title: pre.title || '', type: pre.type || 'test', subject: pre.subject || '', date: date || todayISO(), time: '', notes: pre.notes || '', notebookId: pre.notebookId || '' };
@@ -402,7 +436,7 @@ async function settingsView() {
     <div class="card"><h3>🔔 Reminders</h3><p class="small muted" style="margin:4px 0 10px">WorkBook pings this device when it's time to study: <b>3 days before</b> a test (4pm), <b>the day before</b> (6pm), and <b>the morning of</b> (7am). Homework/projects: day before + day of.</p>
       <div id="pushBox">${st.enabled ? `<div class="ai-status" style="background:var(--green-soft);color:#14663f">✅ Reminders are ON for this device</div><div class="btn-row" style="margin-top:10px"><button class="btn sm" id="pushTest">Send a test notification</button><button class="btn sm danger" id="pushOff">Turn off</button></div>` : `<button class="btn primary" id="pushOn">${icon('bell')} Turn on reminders on this device</button>${isIOS() && !isStandalone() ? '<div class="small muted" style="margin-top:8px">📱 On iPhone/iPad: tap <b>Share → Add to Home Screen</b>, open WorkBook from there, then tap this button.</div>' : ''}${!pushSupported() && !isIOS() ? '<div class="small muted" style="margin-top:8px">This browser doesn’t support notifications.</div>' : ''}`}</div>
       <div style="margin-top:12px" class="small"><b>Which reminders</b><div class="btn-row" style="margin-top:6px"><label class="chip"><input type="checkbox" class="rp" data-k="d3" ${prefs.d3 === false ? '' : 'checked'}> 3 days before</label><label class="chip"><input type="checkbox" class="rp" data-k="d1" ${prefs.d1 === false ? '' : 'checked'}> Day before</label><label class="chip"><input type="checkbox" class="rp" data-k="d0" ${prefs.d0 === false ? '' : 'checked'}> Morning of</label></div></div>
-      <p class="small muted" style="margin-top:10px">Want real text messages? That needs an SMS account (Twilio) — ask Colton to hook it up.</p></div>
+      <div id="smsBox">${await smsSettingsHtml()}</div></div>
     <div class="card"><h3>Profile</h3><div class="field"><label>Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label>Username</label><input type="text" value="${esc(state.user.username)}" disabled></div><button class="btn primary" id="saveP">Save</button>
       <h3 style="margin-top:18px">AI</h3><p class="small muted">Backend: <b>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')}</b> · Model: <b>${esc(state.ai?.model || '')}</b></p>
       <h3 style="margin-top:18px">Account</h3><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>`;
@@ -411,6 +445,7 @@ async function settingsView() {
   const on = $('#pushOn'); if (on) on.onclick = async () => { busy(on, true, 'Turning on…'); try { await enablePush(); toast('Reminders on 🎉', 'ok'); settingsView(); } catch (e) { toast(e.message, 'err'); busy(on, false); } };
   const off = $('#pushOff'); if (off) off.onclick = async () => { await disablePush(); toast('Reminders off'); settingsView(); };
   const tp = $('#pushTest'); if (tp) tp.onclick = () => testPush();
+  wireSms(() => settingsView());
   $$('.rp').forEach(c => c.onchange = async () => { const rem = { ...(state.user.settings?.reminders || {}) }; rem[c.dataset.k] = c.checked; const r = await api.patch('/me', { settings: { reminders: rem } }); state.user = r.user; });
 }
 
@@ -428,13 +463,15 @@ route('/planner', plannerView);
 route('/study', studyListView);
 route('/study/:id', studyView);
 route('/settings', settingsView);
+route('/progress', progressView);
+route('/s/:token', sharedView);
 
 async function boot() {
   try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; } catch {}
   registerSW();
   const guard = async () => {
     const hash = location.hash || '#/';
-    if (!state.user && !/^#\/(login|register)/.test(hash)) { return authView(hash === '#/register' ? 'register' : 'login'); }
+    if (!state.user && !/^#\/(login|register|s\/)/.test(hash)) { return authView(hash === '#/register' ? 'register' : 'login'); }
     if (state.user && /^#\/(login|register)/.test(hash)) return go('#/');
     document.onkeydown = null;
     await dispatch();

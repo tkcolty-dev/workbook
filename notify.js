@@ -13,6 +13,24 @@ async function init() {
 }
 const publicKey = () => vapid?.publicKey;
 
+// ---- SMS (Twilio REST, no SDK). Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM to enable. ----
+const smsConfigured = () => !!(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM);
+async function sms(to, body) {
+  if (!smsConfigured()) throw new Error('SMS not configured');
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  const r = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, { method: 'POST', headers: { Authorization: 'Basic ' + Buffer.from(sid + ':' + process.env.TWILIO_AUTH_TOKEN).toString('base64'), 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ To: to, From: process.env.TWILIO_FROM, Body: body }) });
+  if (!r.ok) { const t = await r.text().catch(() => ''); throw new Error('Twilio ' + r.status + ': ' + t.slice(0, 160)); }
+  return true;
+}
+async function notifyUser(user, payload) {
+  let n = await send(user, payload);
+  const smsCfg = user.settings?.sms;
+  if (smsConfigured() && smsCfg?.verified && smsCfg.enabled !== false && smsCfg.phone) {
+    try { await sms(smsCfg.phone, `${payload.title}\n${payload.body}${payload.url ? '\n' + (process.env.PUBLIC_URL || 'https://workbook.apps.tas-ndc.kuhn-labs.com') + payload.url : ''}`); n++; } catch (e) { console.error('sms failed', e.message); }
+  }
+  return n;
+}
+
 async function send(user, payload) {
   const subs = user.push || [];
   let ok = 0;
@@ -39,10 +57,11 @@ const DEFAULT_PLAN = { d3: { days: 3, hour: 16 }, d1: { days: 1, hour: 18 }, d0:
 async function tick() {
   try {
     for (const user of store.users.all()) {
-      if (!user.push?.length) continue;
+      const hasSms = smsConfigured() && user.settings?.sms?.verified && user.settings.sms.enabled !== false;
+      if (!user.push?.length && !hasSms) continue;
       const prefs = user.settings?.reminders || {};
       if (prefs.enabled === false) continue;
-      const tz = user.push[0].tz ?? 0;
+      const tz = user.push?.[0]?.tz ?? user.settings?.tz ?? 0;
       const now = localParts(Date.now(), tz);
       const d = store.db(user.id);
       let changed = false;
@@ -58,13 +77,27 @@ async function tick() {
           const when = diff === 0 ? 'is TODAY' : diff === 1 ? 'is TOMORROW' : `is in ${diff} days`;
           const studyUrl = ev.studyId ? `/#/study/${ev.studyId}` : (isTest ? `/#/study?new=1&event=${ev.id}` : '/#/planner');
           const body = isTest ? (diff === 0 ? `Good luck! Quick review: open your study set.` : `Time to study — open your study sheet, flashcards or a practice test.`) : (diff === 0 ? 'Due today — is it done?' : 'Due tomorrow — finish it tonight.');
-          const sent = await send(user, { title: `${isTest ? '📚' : '📝'} ${ev.title} ${when}`, body, url: studyUrl, tag: 'ev-' + ev.id + '-' + key });
+          const sent = await notifyUser(user, { title: `${isTest ? '📚' : '📝'} ${ev.title} ${when}`, body, url: studyUrl, tag: 'ev-' + ev.id + '-' + key });
           if (sent) { ev.notified[key] = Date.now(); changed = true; }
         }
       }
       if (changed) store.save(user.id);
+      // weekly digest on Sunday evening
+      const dow = new Date(Date.now() - tz * 60000).getUTCDay();
+      const weekKey = 'w' + now.iso.slice(0, 4) + '-' + Math.floor((Date.parse(now.iso) / 86400000 + 4) / 7);
+      user.digests ||= {};
+      if (dow === 0 && now.hour >= 18 && !user.digests[weekKey] && prefs.weekly !== false) {
+        const since = Date.now() - 7 * 86400000;
+        const pages = d.pages.filter(p => p.createdAt > since).length;
+        const att = []; for (const st of d.study) for (const t of st.tests || []) for (const a of t.attempts || []) if (a.at > since) att.push(a.percent);
+        const avg = att.length ? Math.round(att.reduce((a, b) => a + b, 0) / att.length) : null;
+        const up = d.events.filter(e => !e.done && e.date >= now.iso).sort((a, b) => a.date.localeCompare(b.date)).slice(0, 3);
+        const body = `This week: ${pages} page${pages === 1 ? '' : 's'} scanned, ${att.length} test${att.length === 1 ? '' : 's'}${avg !== null ? ' (avg ' + avg + '%)' : ''}. ${up.length ? 'Coming up: ' + up.map(e => e.title + ' ' + e.date.slice(5)).join(', ') + '.' : 'Nothing scheduled — add your next test!'}`;
+        const sent = await notifyUser(user, { title: '📊 Your WorkBook week', body, url: '/#/progress', tag: 'weekly' });
+        if (sent) { user.digests[weekKey] = Date.now(); store.users.update(user, {}); }
+      }
     }
   } catch (e) { console.error('reminder tick failed', e.message); }
 }
 
-module.exports = { init, publicKey, send, tick };
+module.exports = { init, publicKey, send, tick, sms, smsConfigured, notifyUser };

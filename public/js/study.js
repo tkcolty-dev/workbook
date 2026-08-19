@@ -1,5 +1,6 @@
 import { state, api, stream, $, $$, esc, h, md, mdi, icon, toast, modal, confirm, busy, fmtDate, countdown, daysUntil, ago, loadNotebooks, loadEvents, loadStudy, invalidate, go, dispatch } from './core.js';
 import { shell } from './app.js';
+import { cramTab, voice, shareThing } from './extras.js';
 
 // ---------- list ----------
 export async function studyListView(_, q = {}) {
@@ -24,6 +25,7 @@ export async function openNewStudy(q = {}) {
     <div class="field"><label>Test / topic</label><input type="text" id="stTitle" value="${esc(ev ? ev.title : (preNb ? (nbs.find(n => n.id === preNb)?.name || '') : ''))}" placeholder="e.g. Chapter 5 test — Cells"></div>
     <div class="row"><div class="field"><label>Subject</label><input type="text" id="stSubject" value="${esc(ev?.subject || nbs.find(n => n.id === preNb)?.subject || '')}"></div><div class="field"><label>Planner event</label><select id="stEvent"><option value="">— none —</option>${evs.filter(e => !e.done).map(e => `<option value="${e.id}" ${e.id === q.event ? 'selected' : ''}>${esc(e.title)} (${fmtDate(e.date)})</option>`).join('')}</select></div></div>
     <div class="field"><label>What's on it? (optional)</label><textarea id="stTopic" placeholder="Chapters, topics, anything the teacher said would be on the test…">${esc(ev?.notes || '')}</textarea></div>
+    <div class="field"><label>Links <span class="muted">(optional — paste a website/article and the AI studies it too)</span></label><div class="row"><input class="input" id="stLinks" placeholder="https://… (separate several with spaces)"></div></div>
     <div class="field"><label>Notebook pages to study from</label>
       <div class="row" style="margin-bottom:6px"><select id="stNb"><option value="">Choose a notebook…</option>${nbs.map(n => `<option value="${n.id}" ${n.id === preNb ? 'selected' : ''}>${esc(n.name)} (${n.scanned} pages)</option>`).join('')}</select><button class="btn sm" id="selAll" type="button">Select all</button></div>
       <div class="src-pages" id="srcPages"><span class="muted small">Pick a notebook above.</span></div><div class="help" id="selCount"></div></div>
@@ -41,7 +43,7 @@ export async function openNewStudy(q = {}) {
   };
   $('#stNb', el).onchange = loadPages; loadPages();
   $('#create', el).onclick = async () => {
-    const body = { title: $('#stTitle', el).value.trim(), subject: $('#stSubject', el).value.trim(), topic: $('#stTopic', el).value.trim(), eventId: $('#stEvent', el).value || null, pageIds: [...chosen] };
+    const body = { title: $('#stTitle', el).value.trim(), subject: $('#stSubject', el).value.trim(), topic: $('#stTopic', el).value.trim(), eventId: $('#stEvent', el).value || null, pageIds: [...chosen], links: $('#stLinks', el).value.split(/\s+/).filter(u => /^https?:\/\//i.test(u)) };
     if (!body.title) return toast('Give it a title', 'err');
     busy($('#create', el), true, 'Creating…');
     try { const s = await api('/study', { body }); invalidate(); m.close(); go('#/study/' + s.id); } catch (e) { toast(e.message, 'err'); busy($('#create', el), false); }
@@ -56,20 +58,24 @@ export async function studyView({ id }, q = {}) {
   const ev = evs.find(e => e.id === s.eventId);
   if (q.tab) tab = q.tab;
   if (q.take) { const t = s.tests.find(t => t.id === q.take); if (t) { let cfg = {}; try { cfg = JSON.parse(sessionStorage.getItem('dwb_take_cfg') || '{}'); } catch {} sessionStorage.removeItem('dwb_take_cfg'); startTest(s, t, cfg); tab = 'test'; } }
-  const TABS = [['sheet', 'sheet', 'Study sheet'], ['online', 'globe', 'More online'], ['test', 'quiz', 'Practice tests'], ['cards', 'cards', 'Flashcards'], ['tutor', 'chat', 'Tutor']];
+  const TABS = [['sheet', 'sheet', 'Study sheet'], ['online', 'globe', 'More online'], ['test', 'quiz', 'Practice tests'], ['cards', 'cards', 'Flashcards'], ['tutor', 'chat', 'Tutor'], ['cram', 'zap', '⚡ Cram']];
+  if (q.fixit && s.graded) tab = 'cards';
   main.innerHTML = `<div class="crumbs"><a href="#/study">Study</a> › <span>${esc(s.title)}</span></div>
-    <div class="page-head"><div><h1>${esc(s.title)}</h1><div class="sub">${esc(s.subject || '')}${ev ? ` · ${fmtDate(ev.date)} · <b class="countdown ${daysUntil(ev.date) <= 3 ? 'urgent' : ''}">${countdown(ev.date)}</b>` : ''} · ${s.pageIds.length} notebook page${s.pageIds.length === 1 ? '' : 's'}</div></div>
-      <div class="btn-row"><button class="btn" id="editSrc">${icon('edit')} Sources</button><button class="btn danger icon" id="delSet">${icon('trash')}</button></div></div>
+    <div class="page-head"><div><h1>${esc(s.title)}</h1><div class="sub">${esc(s.subject || '')}${ev ? ` · ${fmtDate(ev.date)} · <b class="countdown ${daysUntil(ev.date) <= 3 ? 'urgent' : ''}">${countdown(ev.date)}</b>` : ''} · ${s.pageIds.length} notebook page${s.pageIds.length === 1 ? '' : 's'}${s.links?.length ? ` · 🔗 ${s.links.length} link${s.links.length === 1 ? '' : 's'}` : ''}</div></div>
+      <div class="btn-row"><button class="btn" id="shareSet">${icon('upload')} Share</button><button class="btn" id="editSrc">${icon('edit')} Sources</button><button class="btn danger icon" id="delSet">${icon('trash')}</button></div></div>
+    ${s.graded ? `<div class="card" style="margin-bottom:14px;background:linear-gradient(135deg,#fff5f2,#fff);border-color:#f7d5cd"><h3>📝 Fix-it set from your graded test${s.graded.testName ? ' — ' + esc(s.graded.testName) : ''}${s.graded.score ? ` <span class="chip red">${esc(s.graded.score)}</span>` : ''}</h3><div class="small" style="margin:6px 0">You missed <b>${s.graded.items.filter(i => i.markedWrong).length}</b> of ${s.graded.items.length}. Concepts to fix: ${(s.graded.missedConcepts || []).map(c => `<span class="chip amber">${esc(c)}</span>`).join(' ')}</div><details><summary class="small" style="cursor:pointer">See what was marked wrong</summary><div class="hw-items" style="margin-top:8px">${s.graded.items.filter(i => i.markedWrong).map(i => `<div class="hw-item wrong"><div class="hw-n">${esc(i.n)}</div><div class="hw-body"><div class="hw-q">${mdi(i.question)}</div><div class="small"><span class="muted">You wrote:</span> <b>${mdi(i.studentAnswer || '—')}</b>${i.correction ? ` · <span class="muted">Correct:</span> <b>${mdi(i.correction)}</b>` : ''}${i.concept ? ` · <span class="chip">${esc(i.concept)}</span>` : ''}</div></div></div>`).join('')}</div></details><div class="small muted" style="margin-top:6px">Flashcards and practice tests in this set are built from exactly these misses.</div></div>` : ''}
     <div class="tabs">${TABS.map(([k, ic, l]) => `<button data-t="${k}" class="${tab === k ? 'active' : ''}">${icon(ic)} ${l}${k === 'test' && s.tests.length ? `<span class="cnt">${s.tests.length}</span>` : ''}${k === 'cards' && s.cards.length ? `<span class="cnt">${s.cards.length}</span>` : ''}</button>`).join('')}</div>
     <div id="tabBody"></div>`;
   $$('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; $$('.tabs button').forEach(x => x.classList.toggle('active', x === b)); drawTab(s); });
   $('#editSrc').onclick = () => editSources(s);
+  $('#shareSet').onclick = () => shareThing('study', s.id, s.title);
+  if (q.fixit && s.graded && !s.cards.length && sessionStorage.getItem('dwb_fixit')) { sessionStorage.removeItem('dwb_fixit'); toast('Making fix-it flashcards + a practice test…'); api(`/study/${s.id}/cards`, { body: { count: 12 } }).then(r => { s.cards = r.cards; if (tab === 'cards') drawTab(s); }).catch(() => {}); api(`/study/${s.id}/test`, { body: { count: 8, types: ['mc', 'short', 'fill'], about: 'only the concepts I missed on the graded test', difficulty: 3 } }).then(t => { s.tests.push(t); toast('Fix-it practice test ready ✅', 'ok'); }).catch(() => {}); }
   $('#delSet').onclick = async () => { if (await confirm('Delete study set?', 'Sheet, tests and flashcards will be removed.')) { await api.del('/study/' + s.id); invalidate(); go('#/study'); } };
   drawTab(s);
 }
 function drawTab(s) {
   const body = $('#tabBody');
-  ({ sheet: sheetTab, online: onlineTab, test: testTab, cards: cardsTab, tutor: tutorTab }[tab] || sheetTab)(s, body);
+  ({ sheet: sheetTab, online: onlineTab, test: testTab, cards: cardsTab, tutor: tutorTab, cram: cramTab }[tab] || sheetTab)(s, body);
 }
 function noSources(s) { return !s.pageIds.length && !s.topic; }
 function genBox({ emoji, title, text, btn, id, extra = '' }) {
@@ -118,7 +124,10 @@ export function testConfigHtml(s, opts = {}) {
   return `<div class="card flat test-cfg" style="margin:0 auto 14px;max-width:640px;text-align:left">
     <div class="field"><label>Test type</label><div class="test-styles">
       <label class="tstyle ${opts.style !== 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="standard" ${opts.style !== 'remake' ? 'checked' : ''}><b>📝 Standard test</b><span>Pick the question types below</span></label>
-      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same page, new numbers</b><span>A copy of your page's problems with different numbers/examples</span></label></div></div>
+      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same page, new numbers</b><span>A copy of your page's problems with different numbers/examples</span></label>
+      <label class="tstyle ${opts.style === 'prompt' ? 'on' : ''}"><input type="radio" name="tStyle" value="prompt" ${opts.style === 'prompt' ? 'checked' : ''}><b>✨ Custom — just tell it</b><span>Describe the test you want in your own words and the AI builds exactly that</span></label></div></div>
+    <div class="field hidden" id="promptField"><label>Describe the test</label><textarea id="tPrompt" style="min-height:90px" placeholder="e.g. 12 questions on the causes of WW1, half multiple choice half short answer, hard, ask me to explain at least 2 · or: a 5-question vocab quiz from my notes, then 3 word problems like Mrs. K gives…">${esc(opts.prompt || '')}</textarea></div>
+    <div class="field"><label>Links to use as material <span class="muted">(optional — websites, articles, class pages)</span></label><div class="links-box" id="linksBox">${(opts.links || []).map(u => `<div class="link-row"><span>🔗 ${esc(u)}</span><button type="button" class="btn icon sm ghost rmLink">${icon('x')}</button></div>`).join('')}<div class="row"><input class="input" id="linkIn" placeholder="https://…"><button type="button" class="btn sm" id="addLink">Add</button></div></div></div>
     <div class="field" id="typesField"><label>Question types</label><div class="btn-row">${Object.entries(TYPE_LABEL).map(([k, v]) => `<label class="chip"><input type="checkbox" class="tType" value="${k}" ${['mc', 'tf', 'short'].includes(k) ? 'checked' : ''}> ${v}</label>`).join('')}</div></div>
     <div class="row"><div class="field"><label>How many questions <span class="muted" id="tCountLbl">(${opts.count || 10})</span></label><input type="range" id="tCount" min="1" max="50" value="${opts.count || 10}"></div>
       <div class="field"><label>Difficulty <span class="muted" id="tDiffLbl">(medium)</span></label><input type="range" id="tDiff" min="1" max="5" value="3"></div></div>
@@ -133,8 +142,11 @@ export function testConfigHtml(s, opts = {}) {
   </div>`;
 }
 export function wireTestConfig(root = document) {
-  const upd = () => { const remake = $('input[name=tStyle]:checked', root)?.value === 'remake'; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root); if (tf) tf.style.display = remake ? 'none' : ''; };
+  const upd = () => { const st = $('input[name=tStyle]:checked', root)?.value; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root); if (tf) tf.style.display = st === 'standard' ? '' : 'none'; const pf = $('#promptField', root); if (pf) pf.classList.toggle('hidden', st !== 'prompt'); };
   $$('input[name=tStyle], input[name=tMode]', root).forEach(r => r.onchange = upd); upd();
+  const addLink = $('#addLink', root), linkIn = $('#linkIn', root);
+  if (addLink) { const add = () => { const u = linkIn.value.trim(); if (!/^https?:\/\//i.test(u)) return toast('Paste a full link starting with http', 'err'); linkIn.value = ''; linkIn.closest('.row').insertAdjacentHTML('beforebegin', `<div class="link-row"><span>🔗 ${esc(u)}</span><button type="button" class="btn icon sm ghost rmLink">${icon('x')}</button></div>`); wireRm(); }; addLink.onclick = add; linkIn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }; }
+  const wireRm = () => $$('.rmLink', root).forEach(b => b.onclick = () => b.closest('.link-row').remove()); wireRm();
   const c = $('#tCount', root), cl = $('#tCountLbl', root); if (c) c.oninput = () => { cl.textContent = '(' + c.value + ')'; };
   const df = $('#tDiff', root), dl = $('#tDiffLbl', root); if (df) df.oninput = () => { dl.textContent = '(' + ['very easy', 'easy', 'medium', 'hard', 'very hard'][df.value - 1] + ')'; };
 }
@@ -142,7 +154,10 @@ export function readTestConfig(root = document) {
   const style = $('input[name=tStyle]:checked', root)?.value || 'standard';
   const types = $$('.tType', root).filter(c => c.checked).map(c => c.value);
   if (style === 'standard' && !types.length) { toast('Pick at least one question type', 'err'); return null; }
-  return { style, types, count: +$('#tCount', root).value, difficulty: +$('#tDiff', root).value, about: $('#tAbout', root)?.value.trim() || '', instructions: $('#tInstr', root)?.value.trim() || '', pageIds: $$('.tPage', root).filter(c => c.checked).map(c => c.value), hints: $('#tHints', root)?.checked !== false, shuffle: !!$('#tShuffle', root)?.checked, mode: $('input[name=tMode]:checked', root)?.value || 'exam', timerMin: +($('#tTimer', root)?.value || 0) };
+  const prompt = $('#tPrompt', root)?.value.trim() || '';
+  if (style === 'prompt' && !prompt) { toast('Describe the test you want', 'err'); return null; }
+  const links = $$('.link-row span', root).map(sp => sp.textContent.replace(/^🔗\s*/, '').trim());
+  return { style, types, prompt, links, count: +$('#tCount', root).value, difficulty: +$('#tDiff', root).value, about: $('#tAbout', root)?.value.trim() || '', instructions: $('#tInstr', root)?.value.trim() || '', pageIds: $$('.tPage', root).filter(c => c.checked).map(c => c.value), hints: $('#tHints', root)?.checked !== false, shuffle: !!$('#tShuffle', root)?.checked, mode: $('input[name=tMode]:checked', root)?.value || 'exam', timerMin: +($('#tTimer', root)?.value || 0) };
 }
 function startTest(s, test, cfg = {}, subset = null) {
   let order = (subset || test.questions.map(q => q.id));
@@ -259,7 +274,7 @@ function cardsTab(s, body) {
     ${deck.view === 'list' ? `<div class="fc-list">${s.cards.map((c, i) => `<div class="card"><span class="st chip ${c.box >= 1 ? 'green' : ''}">${c.box >= 1 ? 'known' : 'learning'}</span><b>${mdi(c.front)}</b><div class="muted">${mdi(c.back)}</div></div>`).join('')}</div>` :
       !cards.length ? `<div class="empty"><div class="big">🎉</div><h3>You know them all!</h3><p>Every card is marked known. Reset to drill again.</p><button class="btn" id="resetK">Reset progress</button></div>` :
       `<div class="fc-stage"><div class="fc ${deck.flipped ? 'flipped' : ''}" id="fc"><div class="face front"><span class="lab">Question · ${deck.i + 1} / ${cards.length}</span><div>${mdi(cur.front)}</div>${cur.hint ? `<span class="hint">Hint: ${esc(cur.hint)}</span>` : '<span class="hint">tap to flip · space</span>'}</div><div class="face back"><span class="lab">Answer</span><div>${mdi(cur.back)}</div></div></div>
-        <div class="fc-controls"><button class="btn" id="prev">${icon('chevL')} Prev</button><button class="btn danger" id="dunno">Still learning</button><button class="btn" style="color:var(--green)" id="know">${icon('check')} Got it</button><button class="btn" id="next">Next ${icon('chevR')}</button></div>
+        <div class="fc-controls"><button class="btn icon" id="sayCard" title="Read aloud">🔊</button><button class="btn" id="prev">${icon('chevL')} Prev</button><button class="btn danger" id="dunno">Still learning</button><button class="btn" style="color:var(--green)" id="know">${icon('check')} Got it</button><button class="btn" id="next">Next ${icon('chevR')}</button></div>
         <div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn sm ghost" id="shuffle">🔀 Shuffle</button><button class="btn sm ghost" id="onlyU">${deck.onlyUnknown ? '✓ Only unknown' : 'Only unknown'}</button><button class="btn sm ghost" id="resetK">Reset progress</button></div></div>`}`;
   $('#vStudy').onclick = () => { deck.view = 'study'; cardsTab(s, body); };
   $('#vList').onclick = () => { deck.view = 'list'; cardsTab(s, body); };
@@ -270,6 +285,7 @@ function cardsTab(s, body) {
   const flip = () => { deck.flipped = !deck.flipped; $('#fc').classList.toggle('flipped', deck.flipped); };
   const move = (d) => { deck.i = (deck.i + d + cards.length) % cards.length; deck.flipped = false; cardsTab(s, body); };
   $('#fc').onclick = flip; $('#prev').onclick = () => move(-1); $('#next').onclick = () => move(1);
+  $('#sayCard').onclick = (e) => { e.stopPropagation(); voice.speak(deck.flipped ? cur.back : cur.front); };
   $('#know').onclick = async () => { cur.box = 1; cur.seen = (cur.seen || 0) + 1; save(); move(1); };
   $('#dunno').onclick = async () => { cur.box = 0; cur.seen = (cur.seen || 0) + 1; save(); move(1); };
   $('#shuffle').onclick = () => { deck.order.sort(() => Math.random() - 0.5); deck.i = 0; deck.flipped = false; cardsTab(s, body); };
@@ -286,8 +302,8 @@ async function genCards(s, body, count) {
 function tutorTab(s, body) {
   const msgs = s.chat || [];
   body.innerHTML = `<div class="chat"><div class="msgs" id="msgs">${msgs.length ? msgs.map(m => `<div class="m ${m.role === 'user' ? 'user' : 'ai'}">${m.role === 'user' ? esc(m.content) : '<div class="md">' + md(m.content) + '</div>'}</div>`).join('') : `<div class="m ai"><div class="md"><p>Hi! I'm your tutor for <b>${esc(s.title)}</b>. I've read your notes${s.sheet ? ' and study sheet' : ''}. Ask me to explain anything, quiz you, or check your understanding. 😊</p></div></div>`}</div>
-    <form id="chatForm"><input id="chatIn" placeholder="Ask anything about this topic…" autocomplete="off"><button class="btn primary" type="submit">Send</button></form></div>
-    <div class="btn-row" style="margin-top:8px"><button class="btn sm ghost sug">Explain the hardest part simply</button><button class="btn sm ghost sug">Quiz me with 3 questions</button><button class="btn sm ghost sug">What should I focus on most?</button></div>`;
+    <form id="chatForm"><button type="button" class="btn icon" id="micBtn" title="Speak your question">🎙</button><input id="chatIn" placeholder="Ask anything about this topic… (or tap the mic)" autocomplete="off"><button class="btn primary" type="submit">Send</button></form></div>
+    <div class="btn-row" style="margin-top:8px;align-items:center"><label class="chip"><input type="checkbox" id="speakToggle" ${localStorage.getItem('dwb_speak') === '1' ? 'checked' : ''}> 🔊 Read answers aloud</label><button class="btn sm primary" id="voiceQuiz">🎙 Voice quiz</button><button class="btn sm ghost sug">Explain the hardest part simply</button><button class="btn sm ghost sug">Quiz me with 3 questions</button><button class="btn sm ghost sug">What should I focus on most?</button></div>`;
   const box = $('#msgs');
   const send = async (text) => {
     if (!text.trim()) return;
@@ -298,8 +314,16 @@ function tutorTab(s, body) {
     try {
       await stream(`/study/${s.id}/chat`, { messages: msgs }, (t) => { reply += t; $('.md', ai).innerHTML = md(reply); box.scrollTop = box.scrollHeight; });
       msgs.push({ role: 'assistant', content: reply }); s.chat = msgs;
+      if (localStorage.getItem('dwb_speak') === '1') voice.speak(reply, () => { if (voiceMode) listen(); });
+      else if (voiceMode) listen();
     } catch (e) { $('.md', ai).innerHTML = `<span class="error">${esc(e.message)}</span>`; }
   };
+  let voiceMode = false, rec = null;
+  const listen = () => { const mic = $('#micBtn'); if (!mic) return; mic.classList.add('listening'); mic.textContent = '🔴'; rec = voice.listen((t, isFinal) => { $('#chatIn').value = t; if (isFinal && t.trim()) { $('#chatIn').value = ''; send(t); } }, () => { mic.classList.remove('listening'); mic.textContent = '🎙'; }); };
+  $('#micBtn').onclick = () => { if (rec) { try { rec.stop(); } catch {} rec = null; return; } listen(); };
+  $('#speakToggle').onchange = (e) => { localStorage.setItem('dwb_speak', e.target.checked ? '1' : '0'); if (!e.target.checked) voice.stop(); };
+  $('#voiceQuiz').onclick = () => { voiceMode = !voiceMode; $('#voiceQuiz').textContent = voiceMode ? '⏹ Stop voice quiz' : '🎙 Voice quiz'; if (voiceMode) { localStorage.setItem('dwb_speak', '1'); $('#speakToggle').checked = true; send('Quiz me out loud: ask me ONE short question at a time from my notes, wait for my answer, tell me if I was right (briefly), then ask the next one. Start now.'); } else { voice.stop(); if (rec) { try { rec.stop(); } catch {} } } };
+  window.addEventListener('hashchange', () => { voice.stop(); if (rec) { try { rec.stop(); } catch {} } }, { once: true });
   $('#chatForm').onsubmit = (e) => { e.preventDefault(); const v = $('#chatIn').value; $('#chatIn').value = ''; send(v); };
   $$('.sug').forEach(b => b.onclick = () => send(b.textContent));
   box.scrollTop = box.scrollHeight;
@@ -311,6 +335,7 @@ async function editSources(s) {
   const chosen = new Set(s.pageIds);
   const m = modal(`<h2>Study sources</h2>
     <div class="field"><label>Topic details</label><textarea id="topic">${esc(s.topic || '')}</textarea></div>
+    <div class="field"><label>Links to study from <span class="muted">(websites, articles, class pages — the AI reads them)</span></label><div class="links-box" id="srcLinks">${(s.links || []).map(u => `<div class="link-row"><span>🔗 ${esc(u)}</span><button type="button" class="btn icon sm ghost rmLink">${icon('x')}</button></div>`).join('')}<div class="row"><input class="input" id="srcLinkIn" placeholder="https://…"><button type="button" class="btn sm" id="srcAddLink">Add</button></div></div></div>
     <div class="field"><label>Notebook pages</label><div class="row" style="margin-bottom:6px"><select id="stNb"><option value="">Choose a notebook…</option>${nbs.map(n => `<option value="${n.id}">${esc(n.name)} (${n.scanned} pages)</option>`).join('')}</select><button class="btn sm" id="selAll" type="button">Select all</button></div><div class="src-pages" id="srcPages"><span class="muted small">${chosen.size} page(s) currently selected. Pick a notebook to change.</span></div><div class="help" id="selCount">${chosen.size} page(s) selected</div></div>
     <div class="actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="save">Save</button></div>`, { wide: true });
   const el = m.el;
@@ -322,5 +347,7 @@ async function editSources(s) {
     $$('input', box).forEach(c => c.onchange = () => { c.checked ? chosen.add(c.value) : chosen.delete(c.value); $('#selCount', el).textContent = chosen.size + ' page(s) selected'; });
     $('#selAll', el).onclick = () => { $$('input', box).forEach(c => { c.checked = true; chosen.add(c.value); }); $('#selCount', el).textContent = chosen.size + ' page(s) selected'; };
   };
-  $('#save', el).onclick = async () => { await api.patch('/study/' + s.id, { topic: $('#topic', el).value, pageIds: [...chosen] }); invalidate(); m.close(); toast('Sources updated — regenerate to use them', 'ok'); dispatch(); };
+  const wireRm2 = () => $$('.rmLink', el).forEach(b => b.onclick = () => b.closest('.link-row').remove()); wireRm2();
+  $('#srcAddLink', el).onclick = () => { const u = $('#srcLinkIn', el).value.trim(); if (!/^https?:\/\//i.test(u)) return toast('Paste a full link starting with http', 'err'); $('#srcLinkIn', el).value = ''; $('#srcLinkIn', el).closest('.row').insertAdjacentHTML('beforebegin', `<div class="link-row"><span>🔗 ${esc(u)}</span><button type="button" class="btn icon sm ghost rmLink">${icon('x')}</button></div>`); wireRm2(); };
+  $('#save', el).onclick = async () => { busy($('#save', el), true, 'Saving (reading links)…'); const links = $$('#srcLinks .link-row span', el).map(sp => sp.textContent.replace(/^🔗\s*/, '').trim()); await api.patch('/study/' + s.id, { topic: $('#topic', el).value, pageIds: [...chosen], links }); invalidate(); m.close(); toast('Sources updated — regenerate to use them', 'ok'); dispatch(); };
 }

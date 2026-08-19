@@ -78,7 +78,7 @@ function pgBackend(cfg) {
 }
 
 // ---------- in-memory state + debounced persistence ----------
-let users = [], sessions = {};
+let users = [], sessions = {}, shares = {};
 const dbs = new Map();
 const timers = new Map();
 function persist(key, getValue) {
@@ -88,7 +88,7 @@ function persist(key, getValue) {
 async function flushAll() {
   const pending = [...timers.entries()];
   for (const [key, t] of pending) { clearTimeout(t); timers.delete(key); }
-  await Promise.all(pending.map(([key]) => backend.saveDoc(key, key === 'users' ? users : key === 'sessions' ? sessions : dbs.get(key.slice(2))).catch(() => {})));
+  await Promise.all(pending.map(([key]) => backend.saveDoc(key, key === 'users' ? users : key === 'sessions' ? sessions : key === 'shares' ? shares : misc[key] !== undefined ? misc[key] : dbs.get(key.slice(2))).catch(() => {})));
 }
 
 async function init() {
@@ -97,6 +97,7 @@ async function init() {
   if (backend.init) await backend.init();
   users = (await backend.loadDocs('users'))[0]?.value || [];
   sessions = (await backend.loadDocs('sessions'))[0]?.value || {};
+  shares = (await backend.loadDocs('shares'))[0]?.value || {};
   for (const { key, value } of await backend.loadDocs('u:')) { value.notebooks ||= []; value.pages ||= []; value.events ||= []; value.study ||= []; dbs.set(key.slice(2), value); }
   const pruned = sessionsApi.prune();
   console.log(`Storage: ${backend.name} (${users.length} users, ${dbs.size} user dbs${pruned ? ', pruned ' + pruned + ' old sessions' : ''})`);
@@ -148,4 +149,5 @@ async function deleteImages(userId, pageId) { for (const k of ['orig', 'enh', 't
 const misc = {};
 async function getDoc(key) { if (misc[key] !== undefined) return misc[key]; const r = await backend.loadDocs(key); misc[key] = r[0]?.value ?? null; return misc[key]; }
 async function setDoc(key, value) { misc[key] = value; await backend.saveDoc(key, value); }
-module.exports = { getDoc, setDoc, init, users: usersApi, sessions: sessionsApi, db, save, uid, saveImage, readImage, readImageBase64, deleteImages, flushAll, backendName: () => backend?.name };
+const sharesApi = () => shares; const saveShares = () => persist('shares', () => shares);
+module.exports = { getDoc, setDoc, shares: sharesApi, saveShares, init, users: usersApi, sessions: sessionsApi, db, save, uid, saveImage, readImage, readImageBase64, deleteImages, flushAll, backendName: () => backend?.name };
