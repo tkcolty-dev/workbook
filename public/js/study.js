@@ -1,6 +1,7 @@
 import { state, api, stream, $, $$, esc, h, md, mdi, icon, toast, modal, confirm, busy, fmtDate, countdown, daysUntil, ago, loadNotebooks, loadEvents, loadStudy, invalidate, go, dispatch } from './core.js';
 import { shell } from './app.js';
 import { cramTab, voice, shareThing } from './extras.js';
+import { fileToCanvas, scaleCanvas, toDataURL } from './imageproc.js';
 
 // ---------- list ----------
 export async function studyListView(_, q = {}) {
@@ -123,10 +124,17 @@ export function testConfigHtml(s, opts = {}) {
   const pages = (opts.pages || []);
   return `<div class="card flat test-cfg" style="margin:0 auto 14px;max-width:640px;text-align:left">
     <div class="field"><label>Test type</label><div class="test-styles">
-      <label class="tstyle ${opts.style !== 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="standard" ${opts.style !== 'remake' ? 'checked' : ''}><b>📝 Standard test</b><span>Pick the question types below</span></label>
-      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same page, new numbers</b><span>A copy of your page's problems with different numbers/examples</span></label>
-      <label class="tstyle ${opts.style === 'prompt' ? 'on' : ''}"><input type="radio" name="tStyle" value="prompt" ${opts.style === 'prompt' ? 'checked' : ''}><b>✨ Custom — just tell it</b><span>Describe the test you want in your own words and the AI builds exactly that</span></label></div></div>
-    <div class="field hidden" id="promptField"><label>Describe the test</label><textarea id="tPrompt" style="min-height:90px" placeholder="e.g. 12 questions on the causes of WW1, half multiple choice half short answer, hard, ask me to explain at least 2 · or: a 5-question vocab quiz from my notes, then 3 word problems like Mrs. K gives…">${esc(opts.prompt || '')}</textarea></div>
+      <label class="tstyle ${!['remake', 'prompt', 'import'].includes(opts.style) ? 'on' : ''}"><input type="radio" name="tStyle" value="standard" ${!['remake', 'prompt', 'import'].includes(opts.style) ? 'checked' : ''}><b>📝 Standard test</b><span>Pick the question types below</span></label>
+      <label class="tstyle ${opts.style === 'remake' ? 'on' : ''}"><input type="radio" name="tStyle" value="remake" ${opts.style === 'remake' ? 'checked' : ''}><b>🔁 Same problems, new numbers</b><span>Copies your page or photos with different numbers/examples</span></label>
+      <label class="tstyle ${opts.style === 'prompt' ? 'on' : ''}"><input type="radio" name="tStyle" value="prompt" ${opts.style === 'prompt' ? 'checked' : ''}><b>✨ Custom — just tell it</b><span>Describe the test you want in your own words and the AI builds exactly that</span></label>
+      <label class="tstyle ${opts.style === 'import' ? 'on' : ''}"><input type="radio" name="tStyle" value="import" ${opts.style === 'import' ? 'checked' : ''}><b>📥 Import a test</b><span>Paste or upload a test you already made (ChatGPT etc.) — it becomes a real, gradable test</span></label></div></div>
+    <div class="field hidden" id="promptField"><label>Describe the test</label><textarea id="tPrompt" style="min-height:90px" placeholder="e.g. 12 questions on the causes of WW1, half multiple choice half short answer, hard, ask me to explain at least 2 · or: same problems as my photos but change out all the numbers…">${esc(opts.prompt || '')}</textarea></div>
+    <div class="field hidden" id="importField"><label>Paste the test</label><textarea id="tImport" style="min-height:120px" placeholder="Paste the whole test here — questions, choices and the answer key if it has one. Missing answers get solved and filled in automatically."></textarea>
+      <div class="btn-row" style="margin-top:6px"><button type="button" class="btn sm" id="tGptPrompt">🤖 Copy ChatGPT prompt</button><button type="button" class="btn sm" id="tFileBtn">📄 Upload a file</button><input type="file" id="tFileIn" accept=".txt,.md,.json,text/plain,text/markdown,application/json" hidden></div>
+      <div class="small muted" style="margin-top:4px">Tip: the ChatGPT prompt makes GPT output the test in this app's exact format, so it imports perfectly. Photos of a printed test work too — add them below.</div></div>
+    <div class="field"><label>Photos of a test or worksheet <span class="muted">(optional — up to 6)</span></label>
+      <div class="btn-row"><button type="button" class="btn sm" id="tAddPhoto">📷 Add photos</button><span class="muted small">AI reads each page, builds the test from them, then re-checks the finished test page by page against your photos.</span></div>
+      <div class="btn-row" id="tPhotoThumbs" style="margin-top:6px"></div><input type="file" id="tPhotoIn" accept="image/*" multiple hidden></div>
     <div class="field"><label>Links to use as material <span class="muted">(optional — websites, articles, class pages)</span></label><div class="links-box" id="linksBox">${(opts.links || []).map(u => `<div class="link-row"><span>🔗 ${esc(u)}</span><button type="button" class="btn icon sm ghost rmLink">${icon('x')}</button></div>`).join('')}<div class="row"><input class="input" id="linkIn" placeholder="https://…"><button type="button" class="btn sm" id="addLink">Add</button></div></div></div>
     <div class="field" id="typesField"><label>Question types</label><div class="btn-row">${Object.entries(TYPE_LABEL).map(([k, v]) => `<label class="chip"><input type="checkbox" class="tType" value="${k}" ${['mc', 'tf', 'short'].includes(k) ? 'checked' : ''}> ${v}</label>`).join('')}</div></div>
     <div class="row"><div class="field"><label>How many questions <span class="muted" id="tCountLbl">(${opts.count || 10})</span></label><input type="range" id="tCount" min="1" max="50" value="${opts.count || 10}"></div>
@@ -138,12 +146,52 @@ export function testConfigHtml(s, opts = {}) {
       <label class="tstyle on"><input type="radio" name="tMode" value="exam" checked><b>🎓 Exam mode</b><span>Answer everything, then get graded</span></label>
       <label class="tstyle"><input type="radio" name="tMode" value="practice"><b>🧪 Practice mode</b><span>Check each answer as you go, with hints</span></label></div></div>
     <div class="row"><div class="field"><label>Timer</label><select id="tTimer"><option value="0">No timer</option><option value="5">5 minutes</option><option value="10">10 minutes</option><option value="15">15 minutes</option><option value="20">20 minutes</option><option value="30">30 minutes</option><option value="45">45 minutes</option></select></div>
-      <div class="field"><label>Extras</label><div class="btn-row"><label class="chip"><input type="checkbox" id="tHints" checked> Hints available</label><label class="chip"><input type="checkbox" id="tShuffle"> Shuffle order</label></div></div></div>
+      <div class="field"><label>Extras</label><div class="btn-row"><label class="chip"><input type="checkbox" id="tHints" checked> Hints available</label><label class="chip"><input type="checkbox" id="tShuffle"> Shuffle order</label><label class="chip" title="After the test is written, the same AI re-solves every question (page by page for photos) and fixes any wrong answers in the key"><input type="checkbox" id="tVerify" checked> Double-check answers</label></div></div></div>
   </div>`;
 }
+// Prompt template for ChatGPT (or any AI): makes it output the test in this app's exact JSON format so imports are 1:1.
+const GPT_TEST_PROMPT = `Make me a practice test on: [YOUR TOPIC — say how many questions, what types, and how hard].
+
+When the test is ready, output it as ONE JSON code block in EXACTLY this format, with no text outside the code block:
+
+{"title":"Test title","description":"1-2 sentences on what it covers","questions":[
+{"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why that answer is right","hint":"a nudge that doesn't give it away"},
+{"id":"q2","type":"tf","question":"True or false: ...","answer":true,"explanation":"...","hint":"..."},
+{"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"...","hint":"..."},
+{"id":"q4","type":"fill","question":"A sentence with one blank written as ____.","answer":"the missing word","explanation":"...","hint":"..."},
+{"id":"q5","type":"explain","question":"Explain ...","answer":"model answer with the key points","explanation":"rubric: what earns full credit","hint":"..."}]}
+
+Rules: "mc" has exactly 4 choices and "answer" is the index (0-3) of the correct choice. "tf" answer is true or false. "fill" has exactly one blank written as ____ in the question. Every question needs "answer", "explanation" and "hint". Number the ids q1, q2, q3… Write all math as LaTeX inside $...$ (escape backslashes for valid JSON, e.g. \\\\frac{1}{2}).`;
+async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } }
 export function wireTestConfig(root = document) {
-  const upd = () => { const st = $('input[name=tStyle]:checked', root)?.value; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root); if (tf) tf.style.display = st === 'standard' ? '' : 'none'; const pf = $('#promptField', root); if (pf) pf.classList.toggle('hidden', st !== 'prompt'); };
+  const upd = () => { const st = $('input[name=tStyle]:checked', root)?.value; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root); if (tf) tf.style.display = st === 'standard' ? '' : 'none'; const pf = $('#promptField', root); if (pf) pf.classList.toggle('hidden', st !== 'prompt'); const imf = $('#importField', root); if (imf) imf.classList.toggle('hidden', st !== 'import'); };
   $$('input[name=tStyle], input[name=tMode]', root).forEach(r => r.onchange = upd); upd();
+  // photos of a test/worksheet
+  const pin = $('#tPhotoIn', root), padd = $('#tAddPhoto', root), pth = $('#tPhotoThumbs', root);
+  if (pin && padd && pth) {
+    pth._photos = pth._photos || [];
+    const draw = () => {
+      pth.innerHTML = pth._photos.map((p, i) => `<div class="tray-item" style="width:74px"><div class="ti-img" style="background-image:url('${p.thumb}')"></div><button type="button" class="btn icon sm ghost rmPhoto" data-i="${i}">${icon('x')}</button></div>`).join('');
+      $$('.rmPhoto', pth).forEach(b => b.onclick = () => { pth._photos.splice(+b.dataset.i, 1); draw(); });
+    };
+    padd.onclick = () => pin.click();
+    pin.onchange = async () => {
+      for (const f of [...pin.files].slice(0, 6 - pth._photos.length)) {
+        try { const c = await fileToCanvas(f, 1600); pth._photos.push({ data: toDataURL(c, 0.85), thumb: toDataURL(scaleCanvas(c, 200), 0.6) }); }
+        catch { toast('Could not read that image', 'err'); }
+      }
+      pin.value = ''; draw();
+    };
+    draw();
+  }
+  // import: copy the ChatGPT prompt / upload a text file
+  const gpt = $('#tGptPrompt', root);
+  if (gpt) gpt.onclick = async () => { (await copyText(GPT_TEST_PROMPT)) ? toast('Prompt copied — paste it into ChatGPT, then paste GPT\'s answer back here', 'ok') : toast('Could not copy', 'err'); };
+  const fbtn = $('#tFileBtn', root), fin = $('#tFileIn', root);
+  if (fbtn && fin) {
+    fbtn.onclick = () => fin.click();
+    fin.onchange = async () => { const f = fin.files[0]; fin.value = ''; if (!f) return; try { $('#tImport', root).value = (await f.text()).slice(0, 30000); toast('File loaded ✓', 'ok'); } catch { toast('Could not read that file — paste the text instead', 'err'); } };
+  }
   const addLink = $('#addLink', root), linkIn = $('#linkIn', root);
   if (addLink) { const add = () => { const u = linkIn.value.trim(); if (!/^https?:\/\//i.test(u)) return toast('Paste a full link starting with http', 'err'); linkIn.value = ''; linkIn.closest('.row').insertAdjacentHTML('beforebegin', `<div class="link-row"><span>🔗 ${esc(u)}</span><button type="button" class="btn icon sm ghost rmLink">${icon('x')}</button></div>`); wireRm(); }; addLink.onclick = add; linkIn.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); add(); } }; }
   const wireRm = () => $$('.rmLink', root).forEach(b => b.onclick = () => b.closest('.link-row').remove()); wireRm();
@@ -156,9 +204,13 @@ export function readTestConfig(root = document) {
   if (style === 'standard' && !types.length) { toast('Pick at least one question type', 'err'); return null; }
   const prompt = $('#tPrompt', root)?.value.trim() || '';
   if (style === 'prompt' && !prompt) { toast('Describe the test you want', 'err'); return null; }
+  const images = ($('#tPhotoThumbs', root)?._photos || []).map(p => p.data);
+  const importText = $('#tImport', root)?.value.trim() || '';
+  if (style === 'import' && !importText && !images.length) { toast('Paste the test (or add photos of it) to import', 'err'); return null; }
   const links = $$('.link-row span', root).map(sp => sp.textContent.replace(/^🔗\s*/, '').trim());
-  return { style, types, prompt, links, count: +$('#tCount', root).value, difficulty: +$('#tDiff', root).value, about: $('#tAbout', root)?.value.trim() || '', instructions: $('#tInstr', root)?.value.trim() || '', pageIds: $$('.tPage', root).filter(c => c.checked).map(c => c.value), hints: $('#tHints', root)?.checked !== false, shuffle: !!$('#tShuffle', root)?.checked, mode: $('input[name=tMode]:checked', root)?.value || 'exam', timerMin: +($('#tTimer', root)?.value || 0) };
+  return { style, types, prompt, importText, images, verify: $('#tVerify', root)?.checked !== false, links, count: +$('#tCount', root).value, difficulty: +$('#tDiff', root).value, about: $('#tAbout', root)?.value.trim() || '', instructions: $('#tInstr', root)?.value.trim() || '', pageIds: $$('.tPage', root).filter(c => c.checked).map(c => c.value), hints: $('#tHints', root)?.checked !== false, shuffle: !!$('#tShuffle', root)?.checked, mode: $('input[name=tMode]:checked', root)?.value || 'exam', timerMin: +($('#tTimer', root)?.value || 0) };
 }
+const genLabel = (cfg) => cfg.images?.length ? `Reading ${cfg.images.length} photo page${cfg.images.length === 1 ? '' : 's'}, building the test & double-checking it page by page…` : cfg.style === 'import' ? 'Converting your test & checking the answers…' : cfg.style === 'remake' ? 'Rewriting with new numbers…' : 'Writing your test…';
 function startTest(s, test, cfg = {}, subset = null) {
   let order = (subset || test.questions.map(q => q.id));
   if (cfg.shuffle) order = order.slice().sort(() => Math.random() - 0.5);
@@ -171,7 +223,7 @@ export async function testOnPage(page, nb) {
   wireTestConfig(m.el);
   $('#goTest', m.el).onclick = async () => {
     const cfg = readTestConfig(m.el); if (!cfg) return;
-    busy($('#goTest', m.el), true, cfg.style === 'remake' ? 'Rewriting with new numbers…' : 'Writing your test…');
+    busy($('#goTest', m.el), true, genLabel(cfg));
     try {
       const set = await api('/study', { body: { title: (page.title || 'Page ' + page.index) + ' — test', subject: nb.subject || '', topic: cfg.about, pageIds: [page.id] } });
       const t = await api(`/study/${set.id}/test`, { body: cfg });
@@ -185,12 +237,12 @@ async function testTab(s, body) {
   let pages = [];
   if (s.pageIds?.length > 1) { try { const nbs = await loadNotebooks(); const seen = new Set(); for (const nb of nbs) { const full = await api('/notebooks/' + nb.id); for (const p of full.pages) if (s.pageIds.includes(p.id) && !seen.has(p.id)) { seen.add(p.id); pages.push(p); } } } catch {} }
   const cfg = testConfigHtml(s, { pages });
-  body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b> ${t.style === 'remake' ? '<span class="chip purple">worksheet · new numbers</span>' : ''}${t.difficulty ? `<span class="chip">${['very easy', 'easy', 'medium', 'hard', 'very hard'][t.difficulty - 1]}</span>` : ''}${t.description ? `<div class="small" style="margin:2px 0 4px;color:var(--ink-2)">${esc(t.description)}</div>` : ''}<div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}" data-mode="exam">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button><button class="btn sm takeT" data-id="${t.id}" data-mode="practice">🧪 Practice</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}${last && last.results && Object.values(last.results).some(r => !r.correct) ? `<button class="btn sm retryT" data-id="${t.id}">↺ Retry missed</button>` : ''}<button class="btn sm ghost printT" data-id="${t.id}">${icon('print')} Print</button></div></div>`; }).join('')}</div>` : ''}
+  body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b> ${t.style === 'remake' ? '<span class="chip purple">new numbers</span>' : ''}${t.style === 'import' ? '<span class="chip blue">imported</span>' : ''}${t.fromPhotos ? `<span class="chip blue">📷 ${t.fromPhotos} photo${t.fromPhotos === 1 ? '' : 's'}</span>` : ''}${t.checked && !t.checked.error ? `<span class="chip green" title="AI re-solved every question${t.fromPhotos ? ' page by page against your photos' : ''} and fixed ${t.checked.fixed || 0} answer${t.checked.fixed === 1 ? '' : 's'}">✓ double-checked</span>` : ''}${t.difficulty ? `<span class="chip">${['very easy', 'easy', 'medium', 'hard', 'very hard'][t.difficulty - 1]}</span>` : ''}${t.description ? `<div class="small" style="margin:2px 0 4px;color:var(--ink-2)">${esc(t.description)}</div>` : ''}<div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}" data-mode="exam">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button><button class="btn sm takeT" data-id="${t.id}" data-mode="practice">🧪 Practice</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}${last && last.results && Object.values(last.results).some(r => !r.correct) ? `<button class="btn sm retryT" data-id="${t.id}">↺ Retry missed</button>` : ''}<button class="btn sm ghost printT" data-id="${t.id}">${icon('print')} Print</button></div></div>`; }).join('')}</div>` : ''}
     ${genBox({ emoji: '✅', title: s.tests.length ? 'Make another test' : 'Make a practice test', text: 'You\'re in charge: pick the type, difficulty, how many, and tell the AI exactly what you want. Take it as an exam or in practice mode with hints.', btn: 'Generate test', id: 'gen', extra: cfg })}`;
   wireTestConfig();
   $('#gen').onclick = async () => {
     const cfgv = readTestConfig(); if (!cfgv) return;
-    busy($('#gen'), true, cfgv.style === 'remake' ? 'Rewriting your page with new numbers…' : 'Writing your test…');
+    busy($('#gen'), true, genLabel(cfgv));
     try { const t = await api(`/study/${s.id}/test`, { body: cfgv }); s.tests.push(t); invalidate(); startTest(s, t, cfgv); drawQuiz(s, body); }
     catch (e) { toast(e.message, 'err'); busy($('#gen'), false); }
   };
@@ -207,7 +259,7 @@ function drawQuiz(s, body) {
   const qs = A.order.map(id => test.questions.find(q => q.id === id)).filter(Boolean);
   const answered = qs.filter(q => answers[q.id] !== undefined && answers[q.id] !== '').length;
   const practice = A.mode === 'practice' && !attempt;
-  body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px"><div><h2>${esc(test.title)}</h2>${test.description ? `<div style="color:var(--ink-2);margin:2px 0">${esc(test.description)}</div>` : ''}<div class="muted small">${qs.length} ${test.style === 'remake' ? 'problems · same as your page, new numbers' : 'questions'}${A.subset ? ' · retrying the ones you missed' : ''}${practice ? ' · 🧪 practice mode' : attempt ? ' · graded' : ' · 🎓 exam mode'}</div></div><div class="btn-row">${A.timerMin && !attempt ? `<span class="chip ${A.timeLeft < 60 ? 'red' : 'blue'}" id="clock">⏱ ${fmtClock(A.timeLeft)}</span>` : ''}<button class="btn sm" id="backT">${icon('chevL')} All tests</button></div></div>
+  body.innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px"><div><h2>${esc(test.title)}</h2>${test.description ? `<div style="color:var(--ink-2);margin:2px 0">${esc(test.description)}</div>` : ''}<div class="muted small">${qs.length} ${test.style === 'remake' ? 'problems · same as your page, new numbers' : 'questions'}${test.checked && !test.checked.error ? ' · ✓ double-checked' : ''}${A.subset ? ' · retrying the ones you missed' : ''}${practice ? ' · 🧪 practice mode' : attempt ? ' · graded' : ' · 🎓 exam mode'}</div></div><div class="btn-row">${A.timerMin && !attempt ? `<span class="chip ${A.timeLeft < 60 ? 'red' : 'blue'}" id="clock">⏱ ${fmtClock(A.timeLeft)}</span>` : ''}<button class="btn sm" id="backT">${icon('chevL')} All tests</button></div></div>
     ${!attempt ? `<div class="progress" style="margin-bottom:14px"><i id="prog" style="width:${Math.round(100 * answered / qs.length)}%"></i></div>` : ''}
     ${attempt ? `<div class="card score-card" style="margin-bottom:16px"><div class="score-ring" style="--p:${attempt.percent}"><div>${attempt.percent}%</div></div><div style="font-family:var(--serif);font-size:20px">${attempt.percent >= 90 ? 'Outstanding! 🌟' : attempt.percent >= 75 ? 'Nice work! 👏' : attempt.percent >= 50 ? 'Getting there — review the misses 💪' : 'Keep studying — you’ve got this 📚'}</div><div class="muted small">${Math.round(attempt.score * 10) / 10} / ${attempt.total} points${attempt.timeSpent ? ' · ' + fmtClock(Math.round(attempt.timeSpent / 1000)) : ''}</div><div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn primary" id="again">${icon('refresh')} Try again</button>${Object.values(attempt.results || {}).some(r => !r.correct) ? `<button class="btn" id="retryMissed">↺ Retry missed only</button>` : ''}<button class="btn" id="practiceAgain">🧪 Practice mode</button><button class="btn" id="newT">${icon('sparkle')} New test</button></div></div>` : ''}
     <div id="qs">${qs.map((q, i) => { const r = attempt?.results?.[q.id] || A.checked[q.id]; const a = answers[q.id]; const graded = !!r; return `<div class="q ${A.flagged.has(q.id) ? 'flagged' : ''}" data-id="${q.id}"><div style="display:flex;justify-content:space-between;align-items:center"><div class="qn">Question ${i + 1} · ${TYPE_LABEL[q.type] || q.type}</div><div class="btn-row">${!attempt ? `<button class="btn icon sm ghost flagQ" title="Flag for later">${A.flagged.has(q.id) ? '🚩' : '⚑'}</button>` : ''}${q.hint && !graded ? `<button class="btn sm ghost hintQ">💡 Hint</button>` : ''}</div></div><div class="qt">${mdi(q.question)}</div>${A.hints.has(q.id) && q.hint ? `<div class="hint-box">💡 ${mdi(q.hint)}</div>` : ''}

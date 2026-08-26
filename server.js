@@ -458,10 +458,29 @@ Return ONLY JSON: {"items":[{"n":"1a","verdict":"correct|partial|wrong|blank","c
     });
     const byN = new Map((chk.items || []).map(c => [String(c.n), c]));
     const merged = items.map(it => { const c = byN.get(String(it.n)) || {}; return { n: String(it.n), problem: it.problem, studentAnswer: it.studentAnswer, work: it.work || '', verdict: ['correct', 'partial', 'wrong', 'blank'].includes(c.verdict) ? c.verdict : (it.studentAnswer ? 'wrong' : 'blank'), correctAnswer: c.correctAnswer || '', explanation: c.explanation || '' }; });
+    // stage 3 — before anything stays marked wrong, look at the page AGAIN: misread handwriting is the #1 cause of unfair marks
+    const flagged = merged.filter(m => (m.verdict === 'wrong' || m.verdict === 'partial') && m.studentAnswer);
+    if (flagged.length) {
+      try {
+        const re = await ai.completeJSON({
+          system: 'You double-check homework marks against the original page image. Misread handwriting (fractions, minus signs, repeating-decimal bars, messy digits) is the #1 cause of wrong marks. Output ONLY JSON.\n' + MATH_RULES,
+          images: [{ mediaType: 'image/jpeg', data }],
+          prompt: `A first checker marked these items wrong or partly wrong. Look at the page image again and for each: (1) verify the student's answer was READ correctly off the page — fix the transcription if not; (2) solve the problem yourself and re-verify the verdict against what the student ACTUALLY wrote. Return the FINAL verdict.\n${JSON.stringify(flagged.map(f => ({ n: f.n, problem: f.problem, studentAnswerAsRead: f.studentAnswer, verdict: f.verdict, correctAnswer: f.correctAnswer })), null, 1)}\nReturn ONLY JSON: {"items":[{"n":"1a","verdict":"correct|partial|wrong","studentAnswer":"fixed transcription ONLY if it was misread, else omit","correctAnswer":"...","explanation":"1-2 friendly sentences (empty if now correct)"}]}`,
+          maxTokens: 3500, effort: 'medium',
+        });
+        for (const r of (re.items || [])) {
+          const m = merged.find(x => x.n === String(r.n)); if (!m) continue;
+          if (['correct', 'partial', 'wrong'].includes(r.verdict)) m.verdict = r.verdict;
+          if (r.studentAnswer) m.studentAnswer = String(r.studentAnswer);
+          if (r.correctAnswer) m.correctAnswer = String(r.correctAnswer);
+          m.explanation = m.verdict === 'correct' ? '' : String(r.explanation || m.explanation);
+        }
+      } catch (e) { console.error('hw recheck:', e.message); }
+    }
     const counts = { correct: 0, partial: 0, wrong: 0, blank: 0 };
     for (const m of merged) counts[m.verdict]++;
     const percent = merged.length ? Math.round(100 * (counts.correct + 0.5 * counts.partial) / merged.length) : 0;
-    p.homework = { items: merged, score: { ...counts, percent }, tips: Array.isArray(chk.tips) ? chk.tips.map(String).slice(0, 6) : [], summary: String(chk.summary || ''), assignment: String(ext.assignment || ''), checkedAt: Date.now() };
+    p.homework = { items: merged, score: { ...counts, percent }, tips: Array.isArray(chk.tips) ? chk.tips.map(String).slice(0, 6) : [], summary: String(chk.summary || ''), assignment: String(ext.assignment || ''), doubleChecked: flagged.length > 0, checkedAt: Date.now() };
     store.save(req.user.id);
     res.json(p.homework);
   } catch (e) { console.error('check:', e.message); res.status(500).json({ error: e.message }); }
@@ -692,6 +711,65 @@ Only include real links you found. Prefer free resources.`,
 });
 
 const TYPE_DESC = { mc: 'mc = multiple choice with 4 choices (answer = index 0-3)', tf: 'tf = true/false (answer = true|false)', short: 'short = short written answer (answer = model answer)', fill: 'fill = fill-in-the-blank: the question contains one blank written as ____ and answer = the missing word/number', explain: 'explain = longer written explanation / show-your-work (answer = model answer with the key points)' };
+
+// ---- answer-key verification: re-solve every generated question and fix wrong keys ----
+function applyQuestionFixes(questions, results) {
+  let fixed = 0;
+  const byId = new Map(questions.map(q => [String(q.id), q]));
+  for (const r of results || []) {
+    const q = byId.get(String(r.id));
+    if (!q || r.ok !== false) continue;
+    let changed = false;
+    if (typeof r.question === 'string' && r.question.trim() && r.question !== q.question) { q.question = r.question; changed = true; }
+    if (r.answer !== undefined && r.answer !== null) {
+      if (q.type === 'mc') { const n = Number(r.answer); if (Number.isInteger(n) && n >= 0 && n < (q.choices || []).length && n !== Number(q.answer)) { q.answer = n; changed = true; } }
+      else if (q.type === 'tf') { const b = String(r.answer) === 'true'; if (b !== !!q.answer) { q.answer = b; changed = true; } }
+      else { const a2 = String(r.answer); if (a2 && a2 !== String(q.answer)) { q.answer = a2; changed = true; } }
+    }
+    if (changed && r.explanation) q.explanation = String(r.explanation);
+    if (changed) fixed++;
+  }
+  return fixed;
+}
+// Checks a test with the same models that built it. With source photos: page by page against each photo.
+// Without: in batches of 12 questions. Returns how many questions were fixed.
+async function verifyTestQuestions(test, { images = [], context = '' } = {}) {
+  const groups = [];
+  if (images.length) {
+    for (let i = 0; i < images.length; i++) { const qs = test.questions.filter(q => (q.page || 1) === i + 1); if (qs.length) groups.push({ qs, image: images[i], pageNo: i + 1, of: images.length }); }
+  } else {
+    for (let i = 0; i < test.questions.length; i += 12) groups.push({ qs: test.questions.slice(i, i + 12) });
+  }
+  const counts = await Promise.all(groups.map(async g => {
+    const payload = g.qs.map(q => ({ id: q.id, type: q.type, question: q.question, choices: q.choices || undefined, answer: q.answer }));
+    const out = await ai.completeJSON({
+      system: 'You are a meticulous test checker. You solve every question yourself from scratch, then verify the answer key. Output ONLY JSON. Inside JSON strings write math as LaTeX with $...$ (escape backslashes as \\\\ for valid JSON).\n' + MATH_RULES,
+      images: g.image ? [g.image] : [],
+      prompt: `${g.image ? `The attached photo is page ${g.pageNo} of ${g.of} of the original test/worksheet these practice questions were built from (with numbers/values changed or customized). First make sure each question is solvable and practices the same skill as this page. Then solve` : 'Solve'} each question yourself, WITHOUT looking at the given answer key, and only then compare your answer with the key.${context ? '\nCONTEXT: ' + context : ''}
+QUESTIONS WITH CURRENT ANSWER KEY:
+${JSON.stringify(payload, null, 1)}
+For each question return {"id","ok":true} if the question is clear and the key matches your answer (equivalent forms count as matching). Otherwise {"id","ok":false, "answer": corrected answer (mc: correct choice index 0-3, tf: true|false, others: model answer text), "question": corrected question ONLY if the question itself is broken/ambiguous, "explanation": corrected explanation, "note": what was wrong}.
+Mark ok:false ONLY for genuinely wrong keys or broken questions — never for style.
+Return ONLY JSON: {"results":[...]}`,
+      maxTokens: 4000, effort: 'medium',
+    });
+    return applyQuestionFixes(g.qs, out.results);
+  }));
+  return counts.reduce((a, b) => a + b, 0);
+}
+// Read one photographed page of a test/worksheet → its problems (runs in parallel across pages).
+async function extractTestPage(img, i, total, subject) {
+  try {
+    return await ai.completeJSON({
+      system: `You read photos of tests, worksheets, homework and textbook pages precisely. Subject: ${subject || 'unknown'}. Output ONLY JSON.\n${MATH_RULES}`,
+      images: [img],
+      prompt: `This is page ${i + 1} of ${total} of material a student wants to practice from. List EVERY problem/question on the page, in order, exactly as written (LaTeX for math). Keep any directions. Note each problem's type: mc (include its choices), tf, fill (fill-in-the-blank), short, or explain (show your work). If part of the page is notes/content rather than problems, summarize that testable content in "contentNotes".
+Return ONLY JSON: {"pageTitle":"...","directions":"...","contentNotes":"","problems":[{"n":"1","type":"mc|tf|fill|short|explain","problem":"...","choices":["..."] ,"answerIfShown":"answer if printed/written on the page, else empty"}]}`,
+      maxTokens: 4000,
+    });
+  } catch (e) { console.error('extract page ' + (i + 1) + ':', e.message); return { pageTitle: '', problems: [], error: e.message }; }
+}
+const photoPagesText = (pagesExt) => pagesExt.map((pg, i) => `--- PAGE ${i + 1}${pg.pageTitle ? ': ' + pg.pageTitle : ''} ---${pg.directions ? '\nDirections: ' + pg.directions : ''}${pg.contentNotes ? '\nContent on the page: ' + pg.contentNotes : ''}\n${(pg.problems || []).map(p => `${p.n}. [${p.type || 'short'}] ${p.problem}${p.choices?.length ? ' | Choices: ' + p.choices.join(' | ') : ''}${p.answerIfShown ? ' | (answer shown: ' + p.answerIfShown + ')' : ''}`).join('\n') || '(no problems found on this page)'}`).join('\n\n');
 app.post('/api/study/:id/test', auth, async (req, res) => {
   const [d, s] = getStudy(req, res); if (!s) return;
   const count = Math.max(1, Math.min(50, parseInt(req.body.count) || 10));
@@ -699,52 +777,90 @@ app.post('/api/study/:id/test', auth, async (req, res) => {
   if (!types.length) types.push('mc', 'tf', 'short');
   const diffN = Math.max(1, Math.min(5, parseInt(req.body.difficulty) || 3));
   const difficulty = ['very easy (basic recall, friendly wording)', 'easy', 'medium / mixed', 'hard (multi-step, apply ideas)', 'very hard (tricky, exam-level, combine ideas)'][diffN - 1];
-  const style = ['remake', 'prompt'].includes(req.body.style) ? req.body.style : 'standard';
+  const style = ['remake', 'prompt', 'import'].includes(req.body.style) ? req.body.style : 'standard';
   const about = String(req.body.about || '').slice(0, 1000);
   const instructions = String(req.body.instructions || '').slice(0, 2000);
   const freePrompt = String(req.body.prompt || '').slice(0, 3000);
+  const importText = String(req.body.importText || '').slice(0, 30000);
   if (Array.isArray(req.body.links) && req.body.links.length) { s.links = [...new Set([...(s.links || []), ...req.body.links.map(u => String(u).trim()).filter(u => /^https?:\/\//i.test(u))])].slice(0, 10); await ensureLinks(s); }
   const wantHints = req.body.hints !== false;
+  const wantVerify = req.body.verify !== false;
   const pageIds = Array.isArray(req.body.pageIds) ? req.body.pageIds.filter(id => (s.pageIds || []).includes(id)) : [];
+  const images = (Array.isArray(req.body.images) ? req.body.images : []).slice(0, 6).map(stripDataUrl);
   try {
+    // Uploaded photos: read every page first (in parallel), so the test can be built from them page by page.
+    let pagesExt = [];
+    let photoBlock = '';
+    if (images.length) {
+      pagesExt = await Promise.all(images.map((img, i) => extractTestPage(img, i, images.length, s.subject)));
+      const nProblems = pagesExt.reduce((n, pg) => n + (pg.problems || []).length, 0);
+      if (!nProblems && !pagesExt.some(pg => pg.contentNotes)) throw new Error("I couldn't read any problems or content in those photos — try clearer, well-lit photos of the whole page.");
+      photoBlock = `\nTHE STUDENT UPLOADED ${images.length} PHOTO PAGE${images.length > 1 ? 'S' : ''} of a real test/worksheet (this is the MAIN source material). What is on them, page by page:\n${photoPagesText(pagesExt)}\n`;
+    }
     const seen = s.tests?.length ? 'Avoid repeating these earlier questions: ' + s.tests.flatMap(t => t.questions.map(q => q.question)).slice(-40).join(' | ') : '';
     const extra = `${about ? '\nWHAT THE TEST IS ABOUT (from the student): ' + about : ''}${instructions ? '\nSTUDENT\'S INSTRUCTIONS FOR THIS TEST (follow them closely): ' + instructions : ''}`;
     const hintLine = wantHints ? '\nFor every question also give a "hint": one short nudge that helps without giving the answer away.' : '';
-    const prompt = style === 'prompt'
-      ? `${studyContext(d, s, pageIds)}\n${extra}
-THE STUDENT'S REQUEST (build EXACTLY what they ask for — number of questions, topics, question types, difficulty, format, wording style; if they don't say, pick sensible defaults around ${count} questions): <<<${freePrompt || 'Make a good practice test on this material.'}>>>
-Allowed question types: ${Object.values(TYPE_DESC).join('; ')}.${hintLine} ${seen}
+    const pageLine = images.length ? '\nEvery question MUST include "page": the photo page number (1-' + images.length + ') it was built from.' : '';
+    const qShapes = `{"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why","hint":"..."${images.length ? ',"page":1' : ''}},
+ {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why","hint":"..."${images.length ? ',"page":1' : ''}},
+ {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"...","hint":"..."${images.length ? ',"page":2' : ''}},
+ {"id":"q4","type":"fill","question":"... ____ ...","answer":"...","explanation":"...","hint":"..."},
+ {"id":"q5","type":"explain","question":"...","answer":"model answer","explanation":"rubric","hint":"..."}`;
+    if (style === 'import' && !importText && !images.length) throw new Error('Paste the test (or add photos of it) to import.');
+    const prompt = style === 'import'
+      ? `${extra}${photoBlock}
+THE STUDENT ALREADY HAS A FINISHED TEST (made with ChatGPT or elsewhere) and wants it converted to this app's digital format EXACTLY as written. Keep every question, in the same order, with its original wording, numbers, choices and answer key. Do NOT invent, reword, drop, merge or add questions — this is a conversion, not a rewrite. Map each question to the closest type: ${Object.values(TYPE_DESC).join('; ')}. If the answer key is missing for a question, solve it yourself to fill in "answer". If explanations or hints are missing, add brief ones (never change given answers unless they are clearly wrong — then fix and note it in "explanation").${hintLine}${pageLine}
+${importText ? 'THE PASTED TEST:\n<<<' + importText + '>>>' : 'The test is in the photographed pages above — convert those exactly, numbers unchanged.'}
 Return ONLY JSON:
 {"title":"...","description":"1-2 sentences: what this test covers","questions":[
- {"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why","hint":"..."},
- {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why","hint":"..."},
- {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"...","hint":"..."},
- {"id":"q4","type":"fill","question":"... ____ ...","answer":"...","explanation":"...","hint":"..."},
- {"id":"q5","type":"explain","question":"...","answer":"model answer","explanation":"rubric","hint":"..."}
+ ${qShapes}
+]}`
+      : style === 'prompt'
+      ? `${studyContext(d, s, pageIds)}\n${extra}${photoBlock}
+THE STUDENT'S REQUEST (build EXACTLY what they ask for — number of questions, topics, question types, difficulty, format, wording style${images.length ? ', what to do with the photographed pages (e.g. "same problems with the numbers changed out")' : ''}; if they don't say, pick sensible defaults around ${count} questions): <<<${freePrompt || 'Make a good practice test on this material.'}>>>
+Allowed question types: ${Object.values(TYPE_DESC).join('; ')}.${hintLine}${pageLine} ${seen}
+Return ONLY JSON:
+{"title":"...","description":"1-2 sentences: what this test covers","questions":[
+ ${qShapes}
 ]}`
       : style === 'remake'
-      ? `${studyContext(d, s, pageIds)}\n${extra}
-Make a PRACTICE WORKSHEET that is a copy of the student's page(s) but with DIFFERENT NUMBERS / values / examples: keep the same kinds of problems, the same order and the same difficulty, and the same skills being practiced (e.g. if the page has "3/4 + 1/8", write "2/5 + 3/10"; if it has a definition to fill in, ask for a similar term from the same topic; if it has a worked example, give a fresh one to solve). Aim for about ${count} problems (fewer only if the page has fewer). Difficulty: ${difficulty}. Every problem is a short-answer question the student solves and types; give the exact model answer and a short solution/explanation.${hintLine} ${seen}
+      ? `${studyContext(d, s, pageIds)}\n${extra}${photoBlock}
+Make a PRACTICE ${images.length ? 'TEST that is a new version of the photographed test' : "WORKSHEET that is a copy of the student's page(s)"} with DIFFERENT NUMBERS / values / examples: keep the same kinds of problems, the same order and the same difficulty, and the same skills being practiced (e.g. if the page has "3/4 + 1/8", write "2/5 + 3/10"; if it has a definition to fill in, ask for a similar term from the same topic; if it has a worked example, give a fresh one to solve).${images.length ? ` Recreate EVERY problem from EVERY page, in order, keeping each problem's TYPE (mc keeps 4 fresh choices, fill keeps a blank, tf stays true/false — flip some statements, short/explain stay written).` : ` Aim for about ${count} problems (fewer only if the page has fewer). Every problem is a short-answer question the student solves and types.`} Difficulty: ${difficulty}. Give the exact model answer and a short solution/explanation for each.${hintLine}${pageLine} ${seen}
 Return ONLY JSON:
-{"title":"...","description":"1-2 sentences: what this worksheet practices and where it came from","questions":[
- {"id":"q1","type":"short","question":"the new problem (LaTeX for math)","answer":"model answer","explanation":"short solution steps","hint":"..."}
+{"title":"...","description":"1-2 sentences: what this ${images.length ? 'test' : 'worksheet'} practices and where it came from","questions":[
+ ${qShapes}
 ]}`
-      : `${studyContext(d, s, pageIds)}\n${extra}
-Write a practice test with exactly ${count} questions. Allowed question types (use a good mix of the allowed ones): ${types.map(t => TYPE_DESC[t]).join('; ')}. Difficulty: ${difficulty}. Cover the material evenly; make it feel like a real school test on this topic.${hintLine} ${seen}
+      : `${studyContext(d, s, pageIds)}\n${extra}${photoBlock}
+Write a practice test with exactly ${count} questions. Allowed question types (use a good mix of the allowed ones): ${types.map(t => TYPE_DESC[t]).join('; ')}. Difficulty: ${difficulty}. Cover the material evenly; make it feel like a real school test on this topic.${hintLine}${pageLine} ${seen}
 Return ONLY JSON:
 {"title":"...","description":"1-2 sentences: what this test covers and what to focus on","questions":[
- {"id":"q1","type":"mc","question":"...","choices":["...","...","...","..."],"answer":0,"explanation":"why","hint":"..."},
- {"id":"q2","type":"tf","question":"...","answer":true,"explanation":"why","hint":"..."},
- {"id":"q3","type":"short","question":"...","answer":"model answer","explanation":"what a good answer must include","hint":"..."},
- {"id":"q4","type":"fill","question":"The powerhouse of the cell is the ____.","answer":"mitochondria","explanation":"...","hint":"..."},
- {"id":"q5","type":"explain","question":"Explain why ...","answer":"model answer with key points","explanation":"rubric: what earns full credit","hint":"..."}
+ ${qShapes}
 ]}`;
-    const out = await ai.completeJSON({
+    // Fast path: if the pasted test is already our JSON (e.g. from the "Copy ChatGPT prompt" template), no conversion needed.
+    let out = null;
+    if (style === 'import' && importText) {
+      try { const parsed = ai.parseJSON(importText); if (parsed && Array.isArray(parsed.questions) && parsed.questions.length) out = parsed; } catch {}
+    }
+    if (!out) out = await ai.completeJSON({
       system: 'You are an expert teacher who writes fair, accurate practice tests and worksheets. Output ONLY JSON. Inside JSON strings, write math as LaTeX with $...$ (escape backslashes as \\\\ for valid JSON).\n' + MATH_RULES,
       prompt, maxTokens: 7000, effort: 'medium',
     });
-    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : ' Practice Test'), description: String(out.description || ''), style, about, instructions, prompt: freePrompt, difficulty: diffN, pageIds, questions: (out.questions || []).map((q, i) => ({ ...q, id: q.id || 'q' + (i + 1), type: style === 'remake' ? 'short' : (TYPE_DESC[q.type] ? q.type : 'short'), hint: wantHints ? String(q.hint || '') : '' })), createdAt: Date.now(), attempts: [] };
+    const test = { id: store.uid(), title: out.title || s.title + (style === 'remake' ? ' Worksheet' : style === 'import' ? ' (imported)' : ' Practice Test'), description: String(out.description || ''), style, about, instructions, prompt: freePrompt, difficulty: diffN, pageIds, fromPhotos: images.length || undefined, questions: (out.questions || []).filter(q => q && q.question).slice(0, 80).map((q, i) => {
+      const type = (style === 'remake' && !images.length) ? 'short' : (TYPE_DESC[q.type] ? q.type : 'short');
+      const base = { id: 'q' + (i + 1), type, question: String(q.question), explanation: String(q.explanation || ''), hint: wantHints ? String(q.hint || '') : '', page: images.length ? Math.max(1, Math.min(images.length, parseInt(q.page) || 1)) : undefined };
+      if (type === 'mc') { base.choices = (Array.isArray(q.choices) ? q.choices : []).slice(0, 6).map(String); base.answer = Math.max(0, Math.min(base.choices.length - 1, parseInt(q.answer) || 0)); }
+      else if (type === 'tf') base.answer = q.answer === true || String(q.answer).toLowerCase() === 'true';
+      else base.answer = String(q.answer ?? '');
+      return base;
+    }).filter(q => q.type !== 'mc' || q.choices.length >= 2), createdAt: Date.now(), attempts: [] };
     if (!test.questions.length) throw new Error('The AI returned no questions — try again');
+    // Double-check the finished test with the same models: page by page against the photos, or in batches.
+    if (wantVerify) {
+      try {
+        const fixed = await verifyTestQuestions(test, { images, context: `Subject: ${s.subject || ''}. Test: ${test.title}. ${about || ''}` });
+        test.checked = { fixed, at: Date.now(), pages: images.length || Math.ceil(test.questions.length / 12) };
+      } catch (e) { console.error('verify test:', e.message); test.checked = { error: e.message, at: Date.now() }; }
+    }
     s.tests.push(test); s.updatedAt = Date.now(); store.save(req.user.id);
     res.json(test);
   } catch (e) { console.error('test:', e.message); res.status(500).json({ error: e.message }); }
@@ -772,11 +888,24 @@ async function gradeHandler(req, res) {
   try {
     if (toAI.length) {
       const graded = await ai.completeJSON({
-        system: 'You are a fair, encouraging teacher grading student answers. Output ONLY JSON. For math, accept equivalent forms (3/4 = 0.75 = $\\\\frac{3}{4}$, unsimplified fractions if the question did not ask to simplify, different variable order) and ignore formatting differences.',
-        prompt: `Grade each student answer. Be fair: accept different wording if the meaning is right; for "fill" accept synonyms/plural/singular and equivalent numbers; for "explain" give partial credit for partially correct reasoning. Score 0-1 (1 = fully correct, 0.5 = partially correct, 0 = wrong) and one or two sentences of specific feedback that teaches.\n${JSON.stringify(toAI, null, 1)}\nReturn ONLY JSON: [{"id":"q3","score":1,"feedback":"..."}]`,
-        maxTokens: 3000, effort: 'low',
+        system: 'You are a fair, careful teacher grading student answers. You ALWAYS solve the question yourself before judging the student. Accept equivalent forms (3/4 = 0.75 = $\\\\frac{3}{4}$, unsimplified fractions if the question did not ask to simplify, different variable order, synonyms, singular/plural, different but correct wording) and ignore formatting differences. Output ONLY JSON.',
+        prompt: `Grade each student answer. For each item: (1) solve the question yourself — put your own brief answer in "solution"; (2) compare the student's answer with YOUR solution and the model answer; (3) score 0-1: 1 = fully correct in any equivalent form, 0.75 = right with a trivial slip (notation/rounding/missing units), 0.5 = right idea or method but wrong result, 0.25 = a relevant start, 0 = wrong or blank; (4) give 1-2 sentences of specific feedback that teaches (name the mistake and show the key step). For "fill" accept synonyms and equivalent numbers; for "explain" grade against the rubric.\n${JSON.stringify(toAI, null, 1)}\nReturn ONLY JSON: [{"id":"q3","solution":"...","score":1,"feedback":"..."}]`,
+        maxTokens: 4000, effort: 'medium',
       });
-      for (const g of graded) if (results[g.id] === undefined) results[g.id] = { correct: Number(g.score) >= 0.75, score: Math.max(0, Math.min(1, Number(g.score) || 0)), feedback: g.feedback || '' };
+      const arr = Array.isArray(graded) ? graded : (graded.items || []);
+      // second opinion on anything not given full credit — catches harsh grading and missed equivalent forms
+      const disputed = arr.filter(g => Number(g.score) < 1 && String((toAI.find(t => t.id === g.id) || {}).student || '').trim());
+      if (disputed.length) {
+        try {
+          const re = await ai.completeJSON({
+            system: 'You are the head teacher double-checking grades another teacher gave. Solve each question yourself first. If the student\'s answer is mathematically or factually equivalent to a correct answer, it deserves FULL credit no matter how it is written. Output ONLY JSON.',
+            prompt: `Re-grade these disputed answers and decide the fair FINAL score 0-1 (same scale: 1, 0.75, 0.5, 0.25, 0). The first grader may have been too harsh or too generous.\n${JSON.stringify(disputed.map(g => { const t = toAI.find(x => x.id === g.id) || {}; return { id: g.id, question: t.question, modelAnswer: t.model, rubric: t.rubric, studentAnswer: t.student, firstScore: g.score, firstFeedback: g.feedback }; }), null, 1)}\nReturn ONLY JSON: [{"id":"q3","score":1,"feedback":"final feedback, 1-2 teaching sentences"}]`,
+            maxTokens: 3000, effort: 'medium',
+          });
+          for (const r of (Array.isArray(re) ? re : re.items || [])) { const g = arr.find(x => x.id === r.id); const sc = Number(r.score); if (g && Number.isFinite(sc)) { g.score = Math.max(0, Math.min(1, sc)); if (r.feedback) g.feedback = r.feedback; } }
+        } catch (e) { console.error('regrade:', e.message); }
+      }
+      for (const g of arr) if (results[g.id] === undefined) results[g.id] = { correct: Number(g.score) >= 0.75, score: Math.max(0, Math.min(1, Number(g.score) || 0)), feedback: g.feedback || '' };
       for (const t of toAI) if (!results[t.id]) results[t.id] = { correct: false, feedback: '' };
     }
     const total = qs.length;
@@ -838,6 +967,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true, storage: store.backend
 const PORT = process.env.PORT || 4980;
 store.init().then(async () => {
   try { await notify.init(); } catch (e) { console.error('notify init failed:', e.message); }
-  app.listen(PORT, () => console.log(`Digital WorkBook running at http://localhost:${PORT}  (AI: ${ai.AVAILABLE ? ai.BACKEND : 'NOT CONFIGURED'})`));
+  const srv = app.listen(PORT, () => console.log(`Digital WorkBook running at http://localhost:${PORT}  (AI: ${ai.AVAILABLE ? ai.BACKEND : 'NOT CONFIGURED'})`));
+  srv.requestTimeout = 600000; srv.headersTimeout = 610000; // photo tests run several AI passes back-to-back
 }).catch(e => { console.error('Storage init failed:', e); process.exit(1); });
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, async () => { try { await store.flushAll(); } catch {} process.exit(0); });
