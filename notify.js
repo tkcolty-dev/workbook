@@ -82,6 +82,14 @@ async function tick() {
         }
       }
       if (changed) store.save(user.id);
+      // daily flashcard review nudge (4pm) when a decent pile is due
+      if (prefs.review !== false && now.hour >= 16) {
+        user.reviewNudge ||= {};
+        if (!user.reviewNudge[now.iso]) {
+          const nowMs = Date.now(); let due = 0; for (const st of d.study) for (const c of st.cards || []) if ((c.due || 0) <= nowMs) due++;
+          if (due >= 8) { const sent = await notifyUser(user, { title: `🃏 ${due} flashcards are due today`, body: 'A quick 5-minute review keeps them in long-term memory.', url: '/#/review', tag: 'review-' + now.iso }); if (sent) { for (const k of Object.keys(user.reviewNudge)) if (k < now.iso) delete user.reviewNudge[k]; user.reviewNudge[now.iso] = nowMs; store.users.update(user, {}); } }
+        }
+      }
       // weekly digest on Sunday evening
       const dow = new Date(Date.now() - tz * 60000).getUTCDay();
       const weekKey = 'w' + now.iso.slice(0, 4) + '-' + Math.floor((Date.parse(now.iso) / 86400000 + 4) / 7);

@@ -16,7 +16,44 @@ export async function api(path, opts = {}) {
   return data;
 }
 api.patch = (p, body) => api(p, { method: 'PATCH', body });
+api.put = (p, body) => api(p, { method: 'PUT', body });
 api.del = (p) => api(p, { method: 'DELETE' });
+// raw binary upload (images) — no base64, no JSON
+api.upload = async (path, blob, contentType = 'image/jpeg') => {
+  const res = await fetch('/api' + path, { method: 'PUT', headers: { 'Content-Type': contentType }, body: blob });
+  let data = null; try { data = await res.json(); } catch {}
+  if (!res.ok) throw new Error(data?.error || ('Upload failed (' + res.status + ')'));
+  return data;
+};
+// download a text file (exports)
+export function download(name, text, type = 'text/plain') {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+export async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } }
+
+// ---------- theme ----------
+export const getTheme = () => { try { return localStorage.getItem('dwb_theme') || 'auto'; } catch { return 'auto'; } };
+export function setTheme(t) {
+  try { localStorage.setItem('dwb_theme', t); } catch {}
+  const r = document.documentElement; if (t === 'light' || t === 'dark') r.dataset.theme = t; else delete r.dataset.theme;
+  document.dispatchEvent(new CustomEvent('themechange', { detail: t }));
+}
+export const isDark = () => document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && document.documentElement.classList.contains('sys-dark'));
+
+// ---------- keyboard: one global listener; each view registers its own handler ----------
+let viewKeys = null, pendingG = 0;
+export function setKeys(fn) { viewKeys = fn; }
+const isTyping = (e) => !!e.target.closest('input,textarea,select,[contenteditable]');
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); import('./palette.js').then(m => m.openPalette()); return; }
+  if (!isTyping(e) && !e.metaKey && !e.ctrlKey && !e.altKey && !$('.modal-bg')) {
+    if (e.key === '/') { e.preventDefault(); import('./palette.js').then(m => m.openPalette()); return; }
+    if (e.key === '?') { e.preventDefault(); import('./palette.js').then(m => m.shortcutsHelp()); return; }
+    if (e.key === 'g') { pendingG = Date.now(); return; }
+    if (pendingG && Date.now() - pendingG < 900) { pendingG = 0; const to = { h: '#/', n: '#/notebooks', s: '#/scan', p: '#/planner', t: '#/study', r: '#/review', d: '#/grades', o: '#/progress', ',': '#/settings' }[e.key]; if (to) { e.preventDefault(); go(to); return; } }
+  }
+  if (viewKeys && !$('.modal-bg')) viewKeys(e);
+});
 
 // SSE POST stream
 export async function stream(path, body, onText) {
@@ -142,6 +179,25 @@ const I = {
   bell: '<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5"/><path d="M4 17v3h16v-3"/>',
   print: '<path d="M7 8V3h10v5M5 8h14a2 2 0 0 1 2 2v6h-4v4H7v-4H3v-6a2 2 0 0 1 2-2z"/>',
+  grades: '<path d="M4 20V10M10 20V4M16 20v-8M22 20H2"/>',
+  review: '<rect x="3" y="6" width="13" height="14" rx="2"/><path d="M8 3h13v14"/><path d="m6 13 2 2 4-4"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/>',
+  speaker: '<path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16 9a4 4 0 0 1 0 6M18.5 6.5a8 8 0 0 1 0 11"/>',
+  pdf: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="M9 17v-6h2a2 2 0 0 1 0 4H9"/>',
+  clipboard: '<rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4V2h6v2M9 10h6M9 14h6"/>',
+  wand: '<path d="m4 20 10-10M14 4l1 2 2 1-2 1-1 2-1-2-2-1 2-1zM19 11l.7 1.3L21 13l-1.3.7L19 15l-.7-1.3L17 13l1.3-.7z"/>',
+  translate: '<path d="M4 5h8M8 3v2c0 4-2 7-5 9M6 9c1 2 3 4 6 5"/><path d="m13 21 4-9 4 9M14.5 17.5h5"/>',
+  restore: '<path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/><path d="M12 8v4l3 2"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  key: '<circle cx="8" cy="14" r="4"/><path d="m11 11 9-9M17 5l2 2M14 8l2 2"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  image: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m21 16-5-5-8 8"/>',
+  question: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
+  play: '<path d="M7 5v14l11-7z"/>',
+  fire: '<path d="M12 22c4 0 7-3 7-7 0-3-2-5-3-7-1 2-2 3-3 3 0-3-1-6-4-8 0 4-4 6-4 12 0 4 3 7 7 7z"/>',
+  lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  clip: '<path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
 };
 // Brand mark: app-icon tile with a clean white notebook page and a small gold spark.
 export const logoSvg = (size = 36) => `<svg class="logo-svg" style="width:${size}px;height:${size}px" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -157,14 +213,18 @@ export const logoSvg = (size = 36) => `<svg class="logo-svg" style="width:${size
 export const icon = (n, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${I[n] || ''}</svg>`;
 
 // ---------- toast / modal ----------
-export function toast(msg, kind = '') {
-  const t = h(`<div class="toast ${kind}">${esc(msg)}</div>`);
+// toast(msg, kind, { action: { label, fn }, ms }) — an action button turns it into an undo bar
+export function toast(msg, kind = '', opts = {}) {
+  const t = h(`<div class="toast ${kind}" role="status"><span>${esc(msg)}</span>${opts.action ? `<button type="button">${esc(opts.action.label)}</button>` : ''}</div>`);
   $('#toasts').appendChild(t);
-  setTimeout(() => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); }, kind === 'err' ? 5000 : 2600);
+  const gone = () => { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(() => t.remove(), 300); };
+  if (opts.action) $('button', t).onclick = () => { gone(); opts.action.fn(); };
+  setTimeout(gone, opts.ms || (kind === 'err' ? 5000 : opts.action ? 7000 : 2600));
+  return { close: gone };
 }
 window.addEventListener('hashchange', () => { $$('.modal-bg').forEach(m => { if (!m.dataset.sticky) m.remove(); }); });
-export function modal(html, { wide = false, onClose } = {}) {
-  const bg = h(`<div class="modal-bg"><div class="modal ${wide ? 'wide' : ''}">${html}</div></div>`);
+export function modal(html, { wide = false, onClose, cls = '' } = {}) {
+  const bg = h(`<div class="modal-bg ${cls}"><div class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true">${html}</div></div>`);
   const close = () => { bg.remove(); document.removeEventListener('keydown', esc_); onClose && onClose(); };
   const esc_ = (e) => { if (e.key === 'Escape') close(); };
   bg.addEventListener('mousedown', e => { if (e.target === bg) close(); });
@@ -200,6 +260,9 @@ export function ago(ts) { const s = (Date.now() - ts) / 1000; if (s < 60) return
 
 export const TYPES = { test: 'Test', quiz: 'Quiz', homework: 'Homework', project: 'Project', reminder: 'Reminder', other: 'Other' };
 export const COLORS = ['navy', 'red', 'green', 'yellow', 'purple', 'teal', 'orange', 'pink', 'black', 'white'];
+export const plural = (n, word, pl) => `${n} ${n === 1 ? word : (pl || word + 's')}`;
+export const fmtMin = (m) => (m >= 60 ? `${Math.floor(m / 60)}h${m % 60 ? ' ' + (m % 60) + 'm' : ''}` : `${m} min`);
+export const loading = (label = 'Loading…') => `<div class="thinking" role="status"><span class="spinner"></span> ${esc(label)}</div>`;
 
 // ---------- data loaders ----------
 export async function loadNotebooks(force) { if (!state.notebooks || force) state.notebooks = await api('/notebooks'); return state.notebooks; }
@@ -211,12 +274,17 @@ export function invalidate() { state.notebooks = state.events = state.study = nu
 const routes = [];
 export function route(pattern, handler) { routes.push({ re: new RegExp('^' + pattern.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$'), handler }); }
 export function go(hash) { location.hash = hash; }
+let navSeq = 0;
 export async function dispatch() {
   const path = (location.hash || '#/').slice(1).split('?')[0] || '/';
   const query = Object.fromEntries(new URLSearchParams((location.hash.split('?')[1] || '')));
+  const seq = ++navSeq; setKeys(null);
   for (const r of routes) {
     const m = path.match(r.re);
-    if (m) { try { await r.handler(m.groups || {}, query); } catch (e) { console.error(e); toast(e.message, 'err'); } return; }
+    if (m) { try { await r.handler(m.groups || {}, query); } catch (e) { if (seq !== navSeq) return; console.error(e); toast(e.message, 'err'); } return; }
   }
   go('#/');
 }
+// views that await data can check this to drop a render the user already navigated away from
+export const navId = () => navSeq;
+export const stale = (seq) => seq !== navSeq;

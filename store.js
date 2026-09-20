@@ -98,11 +98,14 @@ async function init() {
   users = (await backend.loadDocs('users'))[0]?.value || [];
   sessions = (await backend.loadDocs('sessions'))[0]?.value || {};
   shares = (await backend.loadDocs('shares'))[0]?.value || {};
-  for (const { key, value } of await backend.loadDocs('u:')) { value.notebooks ||= []; value.pages ||= []; value.events ||= []; value.study ||= []; dbs.set(key.slice(2), value); }
+  for (const { key, value } of await backend.loadDocs('u:')) dbs.set(key.slice(2), normalizeDb(value));
   const pruned = sessionsApi.prune();
-  console.log(`Storage: ${backend.name} (${users.length} users, ${dbs.size} user dbs${pruned ? ', pruned ' + pruned + ' old sessions' : ''})`);
+  let purged = 0; for (const id of dbs.keys()) purged += await purgeTrash(id).catch(() => 0);
+  console.log(`Storage: ${backend.name} (${users.length} users, ${dbs.size} user dbs${pruned ? ', pruned ' + pruned + ' old sessions' : ''}${purged ? ', purged ' + purged + ' trashed items' : ''})`);
   return backend.name;
 }
+function emptyDb() { return { notebooks: [], pages: [], events: [], study: [], trash: [], activity: {}, grades: null }; }
+function normalizeDb(v) { const e = emptyDb(); for (const k of Object.keys(e)) if (v[k] === undefined) v[k] = e[k]; return v; }
 
 // ---------- users & sessions ----------
 function hashPassword(pw, salt) { salt = salt || crypto.randomBytes(16).toString('hex'); return { salt, hash: crypto.scryptSync(pw, salt, 64).toString('hex') }; }
@@ -116,6 +119,7 @@ const usersApi = {
   byId: (id) => users.find(u => u.id === id),
   create: ({ username, password, name }) => { const { salt, hash } = hashPassword(password); const u = { id: uid(), username, name: name || username, salt, hash, createdAt: Date.now() }; users.push(u); saveUsers(); return u; },
   verify: (u, password) => verifyPassword(password, u.salt, u.hash),
+  setPassword: (u, password) => { Object.assign(u, hashPassword(password)); saveUsers(); },
   update: (u, patch) => { Object.assign(u, patch); saveUsers(); },
   public: (u) => ({ id: u.id, username: u.username, name: u.name, createdAt: u.createdAt, settings: u.settings || {} }),
 };
@@ -125,29 +129,89 @@ const sessionsApi = {
   get: (t) => { const s = sessions[t]; if (!s) return null; if (Date.now() - (s.lastSeen || s.createdAt) > SESSION_IDLE_MS) { delete sessions[t]; saveSessions(); return null; } return s; },
   touch: (t) => { if (sessions[t]) { sessions[t].lastSeen = Date.now(); saveSessions(); } },
   destroy: (t) => { delete sessions[t]; saveSessions(); },
+  destroyAllFor: (userId, except) => { for (const [t, s] of Object.entries(sessions)) if (s.userId === userId && t !== except) delete sessions[t]; saveSessions(); },
   prune: () => { let n = 0; for (const [t, s] of Object.entries(sessions)) if (Date.now() - (s.lastSeen || s.createdAt) > SESSION_IDLE_MS) { delete sessions[t]; n++; } if (n) saveSessions(); return n; },
 };
 
 // ---------- per-user db ----------
 function db(userId) {
-  if (!dbs.has(userId)) dbs.set(userId, { notebooks: [], pages: [], events: [], study: [] });
+  if (!dbs.has(userId)) dbs.set(userId, emptyDb());
   return dbs.get(userId);
 }
 function save(userId) { persist('u:' + userId, () => dbs.get(userId)); }
+// lookups (small arrays — a linear scan is cheaper than keeping indexes in sync)
+const findNb = (d, id) => d.notebooks.find(n => n.id === id) || null;
+const findPage = (d, id) => d.pages.find(p => p.id === id) || null;
+const findStudy = (d, id) => d.study.find(s => s.id === id) || null;
+const findEvent = (d, id) => d.events.find(e => e.id === id) || null;
+const pagesOf = (d, nbId) => d.pages.filter(p => p.notebookId === nbId).sort((a, b) => a.index - b.index);
+const nextIndex = (d, nbId) => d.pages.reduce((m, p) => (p.notebookId === nbId && p.index > m ? p.index : m), 0) + 1;
+function reindex(d, nbId) { pagesOf(d, nbId).forEach((p, i) => { p.index = i + 1; }); }
+// one pass over pages → { notebookId: count }
+function scannedCounts(d) { const c = {}; for (const p of d.pages) c[p.notebookId] = (c[p.notebookId] || 0) + 1; return c; }
 
-// ---------- images (async) ----------
+// ---------- images (async, binary) ----------
+const IMAGE_KINDS = ['orig', 'enh', 'thumb'];
 const blobKey = (userId, pageId, kind) => `${userId}/${pageId}-${kind}`;
+async function saveImageBuffer(userId, pageId, kind, buf) { if (!IMAGE_KINDS.includes(kind)) throw new Error('bad image kind'); if (!buf?.length) throw new Error('empty image'); await backend.putBlob(blobKey(userId, pageId, kind), buf); }
 async function saveImage(userId, pageId, kind, dataUrl) {
   const m = String(dataUrl).match(/^data:(image\/\w+);base64,(.+)$/);
   if (!m) throw new Error('bad image data');
-  await backend.putBlob(blobKey(userId, pageId, kind), Buffer.from(m[2], 'base64'));
+  await saveImageBuffer(userId, pageId, kind, Buffer.from(m[2], 'base64'));
 }
 async function readImage(userId, pageId, kind) { return backend.getBlob(blobKey(userId, pageId, kind)); }
 async function readImageBase64(userId, pageId, kind) { const b = await readImage(userId, pageId, kind); return b ? b.toString('base64') : null; }
-async function deleteImages(userId, pageId) { for (const k of ['orig', 'enh', 'thumb']) await backend.delBlob(blobKey(userId, pageId, k)); }
+// best image for AI reading: enhanced, else the original photo
+async function readImageForAI(userId, pageId) { return (await readImageBase64(userId, pageId, 'enh')) || (await readImageBase64(userId, pageId, 'orig')); }
+async function deleteImages(userId, pageId) { for (const k of IMAGE_KINDS) await backend.delBlob(blobKey(userId, pageId, k)); }
+async function copyImages(fromUser, fromPage, toUser, toPage) { for (const k of IMAGE_KINDS) { const b = await backend.getBlob(blobKey(fromUser, fromPage, k)); if (b) await backend.putBlob(blobKey(toUser, toPage, k), b); } }
+
+// ---------- trash (30-day undo for pages & notebooks; images are only deleted when the trash is purged) ----------
+const TRASH_DAYS = 30;
+function trashPage(d, page) {
+  const i = d.pages.indexOf(page); if (i < 0) return null;
+  d.pages.splice(i, 1); reindex(d, page.notebookId);
+  const nb = findNb(d, page.notebookId);
+  const item = { id: uid(), kind: 'page', deletedAt: Date.now(), page, notebookName: nb?.name || '', notebookColor: nb?.color || 'navy' };
+  d.trash.unshift(item); return item;
+}
+function trashNotebook(d, nb) {
+  const i = d.notebooks.indexOf(nb); if (i < 0) return null;
+  d.notebooks.splice(i, 1);
+  const pages = pagesOf(d, nb.id); d.pages = d.pages.filter(p => p.notebookId !== nb.id);
+  const item = { id: uid(), kind: 'notebook', deletedAt: Date.now(), notebook: nb, pages };
+  d.trash.unshift(item); return item;
+}
+function restoreTrash(d, itemId) {
+  const i = d.trash.findIndex(t => t.id === itemId); if (i < 0) return null;
+  const [item] = d.trash.splice(i, 1);
+  if (item.kind === 'notebook') {
+    if (!findNb(d, item.notebook.id)) d.notebooks.push(item.notebook);
+    for (const p of item.pages) d.pages.push(p);
+    reindex(d, item.notebook.id);
+    return { kind: 'notebook', notebook: item.notebook };
+  }
+  const p = item.page;
+  let nb = findNb(d, p.notebookId);
+  if (!nb) { nb = { id: uid(), name: item.notebookName || 'Restored pages', subject: '', color: item.notebookColor || 'navy', pageCount: 0, description: '', createdAt: Date.now(), updatedAt: Date.now() }; d.notebooks.push(nb); p.notebookId = nb.id; }
+  p.index = nextIndex(d, nb.id); d.pages.push(p); nb.updatedAt = Date.now();
+  return { kind: 'page', page: p, notebook: nb };
+}
+async function purgeTrashItem(userId, item) { const pages = item.kind === 'page' ? [item.page] : item.pages; for (const p of pages) await deleteImages(userId, p.id).catch(() => {}); }
+async function purgeTrash(userId, all = false) {
+  const d = db(userId); const cutoff = Date.now() - TRASH_DAYS * 86400000; let n = 0;
+  for (const item of d.trash.slice()) if (all || item.deletedAt < cutoff) { await purgeTrashItem(userId, item); d.trash.splice(d.trash.indexOf(item), 1); n++; }
+  if (n) save(userId);
+  return n;
+}
 
 const misc = {};
 async function getDoc(key) { if (misc[key] !== undefined) return misc[key]; const r = await backend.loadDocs(key); misc[key] = r[0]?.value ?? null; return misc[key]; }
 async function setDoc(key, value) { misc[key] = value; await backend.saveDoc(key, value); }
 const sharesApi = () => shares; const saveShares = () => persist('shares', () => shares);
-module.exports = { getDoc, setDoc, shares: sharesApi, saveShares, init, users: usersApi, sessions: sessionsApi, db, save, uid, saveImage, readImage, readImageBase64, deleteImages, flushAll, backendName: () => backend?.name };
+module.exports = {
+  getDoc, setDoc, shares: sharesApi, saveShares, init, users: usersApi, sessions: sessionsApi, db, save, uid, flushAll, backendName: () => backend?.name, TRASH_DAYS,
+  findNb, findPage, findStudy, findEvent, pagesOf, nextIndex, reindex, scannedCounts,
+  saveImage, saveImageBuffer, readImage, readImageBase64, readImageForAI, deleteImages, copyImages,
+  trashPage, trashNotebook, restoreTrash, purgeTrash, purgeTrashItem,
+};

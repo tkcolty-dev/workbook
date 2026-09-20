@@ -18,10 +18,48 @@ for (const envPath of [__dirname + '/.env', __dirname + '/../Calorie_Counter/ser
 const ai = require('./ai');
 const store = require('./store');
 const notify = require('./notify');
+const compression = require('compression');
 
 const app = express();
+// gzip JSON/JS/CSS (images are skipped by the default filter; streaming chat/ask endpoints must not be buffered)
+app.use(compression({ filter: (req, res) => !/\/(chat|ask)$/.test(req.path) && compression.filter(req, res) }));
 app.use(express.json({ limit: '40mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], setHeaders: (res, file) => { if (/\.(js|css|html)$/.test(file)) res.setHeader('Cache-Control', 'no-cache'); else res.setHeader('Cache-Control', 'public, max-age=604800'); } }));
+// vendored libs never change under the same path → cache for a year; app files revalidate (ETag → 304)
+app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'], setHeaders: (res, file) => {
+  if (file.includes(path.sep + 'vendor' + path.sep)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+  else if (/\.(js|css|html|json)$/.test(file)) res.setHeader('Cache-Control', 'no-cache');
+  else res.setHeader('Cache-Control', 'public, max-age=604800');
+} }));
+
+// ---------- small helpers ----------
+const EVENT_TYPES = ['test', 'quiz', 'homework', 'project', 'reminder'];
+const evType = (t, def = 'homework') => (EVENT_TYPES.includes(t) ? t : def);
+const isISODate = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+const isoDate = (d = new Date()) => d.toISOString().slice(0, 10);
+const str = (v, max = 1000) => String(v ?? '').slice(0, max);
+const clampInt = (v, lo, hi, def) => { const n = parseInt(v); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : def; };
+function todayCtx() { const today = new Date(); return { todayISO: isoDate(today), dow: today.toLocaleDateString('en-US', { weekday: 'long' }) }; }
+// push a past date forward into the current/next school year (models love last year's dates)
+function futureDate(dt, todayISO) { if (!isISODate(dt)) return null; if (dt >= todayISO) return dt; let y = +dt.slice(0, 4); const limit = +todayISO.slice(0, 4) + 2; while (dt < todayISO && y < limit) { y++; dt = y + dt.slice(4); } return dt; }
+// plain-text excerpt of a Markdown transcript (list rows, search snippets)
+function plain(text, n = 160) {
+  let t = String(text || '');
+  t = t.replace(/\[\[figure:\d+\]\]/gi, '🖼').replace(/\$\$([\s\S]+?)\$\$|\$([^$\n]+?)\$/g, (m, a, b) => (a || b || '').replace(/\\(frac|dfrac)\{([^}]*)\}\{([^}]*)\}/g, '$2/$3').replace(/\\[a-zA-Z]+/g, '').replace(/[{}]/g, ''))
+    .replace(/^#+\s*/gm, '').replace(/[*_`>~]/g, '').replace(/\|/g, ' ').replace(/\s+/g, ' ').trim();
+  return t.length > n ? t.slice(0, n - 1) + '…' : t;
+}
+// light page shape for lists (no transcript / figures / homework bodies)
+const pageSummary = (p) => ({ id: p.id, notebookId: p.notebookId, index: p.index, title: p.title || '', status: p.status, rev: p.rev || 0, createdAt: p.createdAt, filter: p.filter, readability: p.readability || '', excerpt: plain(p.transcript, 150), topics: p.topics || [], keyPointsN: (p.keyPoints || []).length, vocabN: (p.vocab || []).length, figuresN: (p.figures || []).length, hasSuggestions: (p.suggestions || []).some(s => !s.done), hasHomework: !!p.homework, homeworkPercent: p.homework?.score?.percent });
+// study set shape for the list view (no sheet / questions / chat bodies)
+function studySummary(s) {
+  const attempts = (s.tests || []).flatMap(t => t.attempts || []); const cards = s.cards || []; const now = Date.now();
+  return { id: s.id, title: s.title, subject: s.subject || '', topic: s.topic || '', eventId: s.eventId || null, pageIds: s.pageIds || [], links: s.links || [], createdAt: s.createdAt, updatedAt: s.updatedAt,
+    hasSheet: !!s.sheet, hasOnline: !!s.online, hasCram: !!s.cram, hasPlan: !!s.plan, graded: !!s.graded,
+    testCount: (s.tests || []).length, attemptCount: attempts.length, best: attempts.length ? Math.max(...attempts.map(a => a.percent)) : null,
+    cardCount: cards.length, cardsKnown: cards.filter(c => (c.box || 0) >= 1).length, cardsDue: cards.filter(c => (c.due || 0) <= now).length,
+    planDone: s.plan ? s.plan.days.reduce((n, d) => n + d.tasks.filter(t => t.done).length, 0) : 0, planTotal: s.plan ? s.plan.days.reduce((n, d) => n + d.tasks.length, 0) : 0 };
+}
+const err = (res, code, msg) => res.status(code).json({ error: msg });
 
 // ---------- auth ----------
 function parseCookies(req) {
@@ -80,6 +118,35 @@ app.patch('/api/me', auth, (req, res) => {
   store.users.update(req.user, patch);
   res.json({ user: store.users.public(req.user) });
 });
+app.post('/api/auth/password', auth, (req, res) => {
+  const { current, password } = req.body || {};
+  if (!store.users.verify(req.user, String(current || ''))) return err(res, 401, 'Current password is wrong');
+  if (!password || password.length < 4) return err(res, 400, 'New password must be at least 4 characters');
+  store.users.setPassword(req.user, password);
+  store.sessions.destroyAllFor(req.user.id, req.sid); // log out other devices
+  res.json({ ok: true });
+});
+
+// ---------- home: everything the dashboard needs in one request ----------
+app.get('/api/home', auth, (req, res) => {
+  const d = store.db(req.user.id); const today = isISODate(req.query.today) ? req.query.today : isoDate(); const now = Date.now();
+  const counts = store.scannedCounts(d);
+  const notebooks = d.notebooks.map(n => ({ ...n, scanned: counts[n.id] || 0 })).sort((a, b) => b.updatedAt - a.updatedAt);
+  const recent = d.pages.slice().sort((a, b) => b.createdAt - a.createdAt).slice(0, 8).map(p => { const nb = store.findNb(d, p.notebookId); return { ...pageSummary(p), notebook: nb?.name || '', color: nb?.color || 'navy' }; });
+  const events = d.events.filter(e => !e.done && e.date >= today).sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
+  const study = d.study.map(studySummary).sort((a, b) => b.updatedAt - a.updatedAt);
+  const due = study.reduce((n, s) => n + s.cardsDue, 0), totalCards = study.reduce((n, s) => n + s.cardCount, 0);
+  const planToday = []; for (const s of d.study) for (const day of s.plan?.days || []) if (day.date === today) for (const t of day.tasks) planToday.push({ ...t, setId: s.id, set: s.title });
+  const streak = streakOf(d);
+  res.json({ notebooks, recent, events: events.slice(0, 8), study: study.slice(0, 4), review: { due, total: totalCards }, planToday, streak, trash: d.trash.length });
+});
+function streakOf(d) {
+  const set = new Set(Object.keys(d.activity || {}));
+  const today = isoDate(), yest = isoDate(new Date(Date.now() - 86400000));
+  let streak = 0, cur = set.has(today) ? today : set.has(yest) ? yest : null;
+  while (cur && set.has(cur)) { streak++; cur = isoDate(new Date(Date.parse(cur) - 86400000)); }
+  return streak;
+}
 
 // ---------- activity log (for progress & streaks) ----------
 function logActivity(userId, kind, n = 1) {
@@ -185,6 +252,27 @@ app.get('/api/shared/:token/image/:pageId', async (req, res) => {
   if (!buf) return res.status(404).end();
   res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'public, max-age=3600'); res.send(buf);
 });
+// save your own copy of something a friend shared (study set: tests/cards reset; notebook: pages + images copied)
+app.post('/api/shared/:token/copy', auth, async (req, res) => {
+  const c = sharedCtx(req, res); if (!c) return;
+  const { sh, d } = c; const mine = store.db(req.user.id);
+  try {
+    if (sh.kind === 'study') {
+      const st = d.study.find(x => x.id === sh.id); if (!st) return err(res, 404, 'Gone');
+      const copy = { ...st, id: store.uid(), title: st.title + (sh.userId === req.user.id ? ' (copy)' : ''), pageIds: [], eventId: null, chat: [], plan: null, cram: st.cram || null, createdAt: Date.now(), updatedAt: Date.now(), copiedFrom: sh.by || '',
+        cards: (st.cards || []).map(k => ({ id: store.uid(), front: k.front, back: k.back, hint: k.hint || '', box: 0, seen: 0, due: 0 })),
+        tests: (st.tests || []).map(t => ({ ...t, id: store.uid(), attempts: [] })) };
+      mine.study.push(copy); store.save(req.user.id);
+      return res.json({ kind: 'study', id: copy.id });
+    }
+    const nb = d.notebooks.find(n => n.id === sh.id); if (!nb) return err(res, 404, 'Gone');
+    const nb2 = { ...nb, id: store.uid(), name: nb.name + (sh.userId === req.user.id ? ' (copy)' : ''), createdAt: Date.now(), updatedAt: Date.now() };
+    mine.notebooks.push(nb2);
+    for (const p of store.pagesOf(d, nb.id)) { const p2 = { ...p, id: store.uid(), notebookId: nb2.id, homework: undefined, chat: undefined, createdAt: Date.now() }; await store.copyImages(sh.userId, p.id, req.user.id, p2.id); mine.pages.push(p2); }
+    store.save(req.user.id);
+    res.json({ kind: 'notebook', id: nb2.id });
+  } catch (e) { console.error('copy shared:', e.message); err(res, 500, e.message); }
+});
 // a friend can take a shared practice test (graded, not saved)
 app.post('/api/shared/:token/grade/:tid', async (req, res) => {
   const c = sharedCtx(req, res); if (!c) return;
@@ -200,8 +288,29 @@ app.post('/api/shared/:token/grade/:tid', async (req, res) => {
 // ---------- notebooks & pages ----------
 const publicPage = (p) => ({ ...p });
 app.get('/api/notebooks', auth, (req, res) => {
-  const d = store.db(req.user.id);
-  res.json(d.notebooks.map(n => ({ ...n, scanned: d.pages.filter(p => p.notebookId === n.id).length })));
+  const d = store.db(req.user.id); const counts = store.scannedCounts(d);
+  res.json(d.notebooks.map(n => ({ ...n, scanned: counts[n.id] || 0 })));
+});
+// all vocab across a notebook (deduped by term), newest page first
+app.get('/api/notebooks/:id/vocab', auth, (req, res) => {
+  const d = store.db(req.user.id); const nb = store.findNb(d, req.params.id); if (!nb) return err(res, 404, 'Not found');
+  const seen = new Set(); const out = [];
+  for (const p of store.pagesOf(d, nb.id)) for (const v of p.vocab || []) { const k = String(v.term).toLowerCase().trim(); if (!k || seen.has(k)) continue; seen.add(k); out.push({ term: v.term, definition: v.definition || '', pageId: p.id, pageIndex: p.index }); }
+  res.json(out);
+});
+// flashcards straight from the vocab the AI already found (no AI call needed)
+function vocabCards(pages, existing = []) {
+  const have = new Set(existing.map(c => String(c.front).toLowerCase().trim())); const out = [];
+  for (const p of pages) for (const v of p.vocab || []) { const k = String(v.term).toLowerCase().trim(); if (!k || have.has(k) || !v.definition) continue; have.add(k); out.push({ id: store.uid(), front: v.term, back: v.definition, hint: '', box: 0, seen: 0, due: 0, fromPage: p.id }); }
+  return out;
+}
+app.post('/api/notebooks/:id/vocab-cards', auth, (req, res) => {
+  const d = store.db(req.user.id); const nb = store.findNb(d, req.params.id); if (!nb) return err(res, 404, 'Not found');
+  const pages = store.pagesOf(d, nb.id); const cards = vocabCards(pages);
+  if (!cards.length) return err(res, 400, 'No vocabulary found in this notebook yet — scan pages with terms and definitions first.');
+  const s = { id: store.uid(), title: `Vocab: ${nb.name}`, subject: nb.subject || '', topic: 'Vocabulary from ' + nb.name, pageIds: pages.map(p => p.id), eventId: null, sheet: '', online: '', tests: [], cards, chat: [], links: [], createdAt: Date.now(), updatedAt: Date.now() };
+  d.study.push(s); store.save(req.user.id); logActivity(req.user.id, 'cards');
+  res.json({ id: s.id, cards: cards.length });
 });
 app.post('/api/notebooks', auth, (req, res) => {
   const { name, subject, color, pageCount, description } = req.body || {};
@@ -211,12 +320,14 @@ app.post('/api/notebooks', auth, (req, res) => {
   d.notebooks.push(nb); store.save(req.user.id);
   res.json({ ...nb, scanned: 0 });
 });
+// ?lite=1 → page summaries (lists / pickers); default → full pages (slideshow, print, export)
 app.get('/api/notebooks/:id', auth, (req, res) => {
   const d = store.db(req.user.id);
-  const nb = d.notebooks.find(n => n.id === req.params.id);
-  if (!nb) return res.status(404).json({ error: 'Not found' });
-  const pages = d.pages.filter(p => p.notebookId === nb.id).sort((a, b) => a.index - b.index).map(publicPage);
-  res.json({ ...nb, scanned: pages.length, pages });
+  const nb = store.findNb(d, req.params.id);
+  if (!nb) return err(res, 404, 'Not found');
+  const pages = store.pagesOf(d, nb.id).map(req.query.lite ? pageSummary : publicPage);
+  const topics = {}; if (req.query.lite) for (const p of pages) for (const t of p.topics || []) topics[t] = (topics[t] || 0) + 1;
+  res.json({ ...nb, scanned: pages.length, pages, topics: Object.entries(topics).sort((a, b) => b[1] - a[1]).slice(0, 24).map(([t, n]) => ({ t, n })) });
 });
 app.patch('/api/notebooks/:id', auth, (req, res) => {
   const d = store.db(req.user.id);
@@ -231,35 +342,53 @@ app.patch('/api/notebooks/:id', auth, (req, res) => {
   nb.updatedAt = Date.now(); store.save(req.user.id);
   res.json(nb);
 });
-app.delete('/api/notebooks/:id', auth, async (req, res) => {
+// delete → trash (30 days, restorable); images are only removed when the trash is purged
+app.delete('/api/notebooks/:id', auth, (req, res) => {
   const d = store.db(req.user.id);
-  const i = d.notebooks.findIndex(n => n.id === req.params.id);
-  if (i < 0) return res.status(404).json({ error: 'Not found' });
-  d.notebooks.splice(i, 1);
-  for (const p of d.pages.filter(p => p.notebookId === req.params.id)) await store.deleteImages(req.user.id, p.id).catch(() => {});
-  d.pages = d.pages.filter(p => p.notebookId !== req.params.id);
-  store.save(req.user.id);
-  res.json({ ok: true });
+  const nb = store.findNb(d, req.params.id); if (!nb) return err(res, 404, 'Not found');
+  const item = store.trashNotebook(d, nb); store.save(req.user.id);
+  res.json({ ok: true, trashId: item.id });
 });
+app.get('/api/trash', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  res.json({ days: store.TRASH_DAYS, items: d.trash.map(t => ({ id: t.id, kind: t.kind, deletedAt: t.deletedAt, title: t.kind === 'page' ? (t.page.title || 'Page ' + t.page.index) : t.notebook.name, sub: t.kind === 'page' ? t.notebookName : `${t.pages.length} page${t.pages.length === 1 ? '' : 's'}`, color: t.kind === 'page' ? t.notebookColor : t.notebook.color, pageId: t.kind === 'page' ? t.page.id : t.pages[0]?.id, rev: t.kind === 'page' ? (t.page.rev || 0) : 0 })) });
+});
+app.post('/api/trash/:id/restore', auth, (req, res) => {
+  const d = store.db(req.user.id); const r = store.restoreTrash(d, req.params.id);
+  if (!r) return err(res, 404, 'Not in trash any more');
+  store.save(req.user.id); res.json(r.kind === 'page' ? { kind: 'page', pageId: r.page.id, notebookId: r.notebook.id } : { kind: 'notebook', notebookId: r.notebook.id });
+});
+app.delete('/api/trash/:id', auth, async (req, res) => {
+  const d = store.db(req.user.id); const item = d.trash.find(t => t.id === req.params.id); if (!item) return err(res, 404, 'Not found');
+  await store.purgeTrashItem(req.user.id, item); d.trash.splice(d.trash.indexOf(item), 1); store.save(req.user.id); res.json({ ok: true });
+});
+app.delete('/api/trash', auth, async (req, res) => { const n = await store.purgeTrash(req.user.id, true); res.json({ ok: true, purged: n }); });
 
-// Save a scanned page (images as data URLs). Returns page; AI runs separately.
+// Save a scanned page. Images can come inline as data URLs (legacy) or be uploaded afterwards as raw JPEG
+// bodies to PUT /api/pages/:id/image/:kind (cheaper: no base64, no 40MB JSON parse). AI runs separately.
 app.post('/api/notebooks/:id/pages', auth, async (req, res) => {
   const d = store.db(req.user.id);
-  const nb = d.notebooks.find(n => n.id === req.params.id);
-  if (!nb) return res.status(404).json({ error: 'Not found' });
-  const { original, enhanced, thumb, index, filter } = req.body || {};
-  if (!enhanced) return res.status(400).json({ error: 'Image required' });
-  const existing = d.pages.filter(p => p.notebookId === nb.id);
-  const idx = Number.isInteger(index) && index > 0 ? index : (existing.reduce((m, p) => Math.max(m, p.index), 0) + 1);
-  const page = { id: store.uid(), notebookId: nb.id, index: idx, filter: filter || 'enhanced', title: '', transcript: '', keyPoints: [], vocab: [], status: 'scanned', createdAt: Date.now() };
+  const nb = store.findNb(d, req.params.id);
+  if (!nb) return err(res, 404, 'Not found');
+  const { original, enhanced, thumb, index, filter, source } = req.body || {};
+  const idx = Number.isInteger(index) && index > 0 ? index : store.nextIndex(d, nb.id);
+  const page = { id: store.uid(), notebookId: nb.id, index: idx, filter: filter || 'enhanced', title: '', transcript: '', keyPoints: [], vocab: [], status: 'scanned', source: source === 'pdf' ? 'pdf' : undefined, createdAt: Date.now() };
   try {
-    await store.saveImage(req.user.id, page.id, 'enh', enhanced);
+    if (enhanced) await store.saveImage(req.user.id, page.id, 'enh', enhanced);
     if (original) await store.saveImage(req.user.id, page.id, 'orig', original);
     if (thumb) await store.saveImage(req.user.id, page.id, 'thumb', thumb);
-  } catch (e) { console.error('save image:', e.message); return res.status(400).json({ error: e.message }); }
+  } catch (e) { console.error('save image:', e.message); return err(res, 400, e.message); }
   d.pages.push(page); nb.updatedAt = Date.now(); logActivity(req.user.id, 'scan');
   store.save(req.user.id);
   res.json(publicPage(page));
+});
+const rawImage = express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '25mb' });
+app.put('/api/pages/:id/image/:kind', auth, rawImage, async (req, res) => {
+  const d = store.db(req.user.id); const p = store.findPage(d, req.params.id); if (!p) return err(res, 404, 'Not found');
+  if (!Buffer.isBuffer(req.body) || !req.body.length) return err(res, 400, 'Send the image as the raw request body (Content-Type: image/jpeg)');
+  try { await store.saveImageBuffer(req.user.id, p.id, req.params.kind, req.body); } catch (e) { return err(res, 400, e.message); }
+  if (req.params.kind === 'enh') { p.rev = (p.rev || 0) + 1; if (req.query.filter) p.filter = String(req.query.filter); }
+  store.save(req.user.id); res.json({ ok: true, rev: p.rev || 0 });
 });
 app.post('/api/notebooks/:id/reorder', auth, (req, res) => {
   const d = store.db(req.user.id);
@@ -272,12 +401,13 @@ app.post('/api/notebooks/:id/reorder', auth, (req, res) => {
   nb.updatedAt = Date.now(); store.save(req.user.id);
   res.json({ ok: true, pages: ordered.map(p => ({ id: p.id, index: p.index })) });
 });
+// page + its notebook with page *summaries* (the viewer only needs titles/ids for prev/next)
 app.get('/api/pages/:id', auth, (req, res) => {
   const d = store.db(req.user.id);
-  const p = d.pages.find(p => p.id === req.params.id);
-  if (!p) return res.status(404).json({ error: 'Not found' });
-  const nb = d.notebooks.find(n => n.id === p.notebookId);
-  const pages = d.pages.filter(x => x.notebookId === p.notebookId).sort((a, b) => a.index - b.index).map(publicPage);
+  const p = store.findPage(d, req.params.id);
+  if (!p) return err(res, 404, 'Not found');
+  const nb = store.findNb(d, p.notebookId);
+  const pages = store.pagesOf(d, p.notebookId).map(pageSummary);
   res.json({ page: publicPage(p), notebook: { ...nb, scanned: pages.length, pages } });
 });
 app.get('/api/pages/:id/image', auth, async (req, res) => {
@@ -312,29 +442,28 @@ app.patch('/api/pages/:id', auth, async (req, res) => {
   store.save(req.user.id);
   res.json(publicPage(p));
 });
-app.delete('/api/pages/:id', auth, async (req, res) => {
+app.delete('/api/pages/:id', auth, (req, res) => {
   const d = store.db(req.user.id);
-  const i = d.pages.findIndex(p => p.id === req.params.id);
-  if (i < 0) return res.status(404).json({ error: 'Not found' });
-  await store.deleteImages(req.user.id, d.pages[i].id).catch(() => {});
-  const nbId = d.pages[i].notebookId;
-  d.pages.splice(i, 1);
-  d.pages.filter(p => p.notebookId === nbId).sort((a, b) => a.index - b.index).forEach((p, k) => { p.index = k + 1; });
-  store.save(req.user.id);
-  res.json({ ok: true });
+  const p = store.findPage(d, req.params.id); if (!p) return err(res, 404, 'Not found');
+  const item = store.trashPage(d, p); store.save(req.user.id);
+  res.json({ ok: true, trashId: item.id });
 });
 app.get('/api/recent', auth, (req, res) => {
   const d = store.db(req.user.id);
   const n = Math.min(30, parseInt(req.query.n) || 10);
-  res.json(d.pages.slice().sort((a, b) => b.createdAt - a.createdAt).slice(0, n).map(p => { const nb = d.notebooks.find(x => x.id === p.notebookId); return { id: p.id, index: p.index, title: p.title, status: p.status, createdAt: p.createdAt, rev: p.rev || 0, notebookId: p.notebookId, notebook: nb?.name || '', color: nb?.color || 'navy' }; }));
+  res.json(d.pages.slice().sort((a, b) => b.createdAt - a.createdAt).slice(0, n).map(p => { const nb = store.findNb(d, p.notebookId); return { ...pageSummary(p), notebook: nb?.name || '', color: nb?.color || 'navy' }; }));
 });
+// search pages (optionally inside one notebook), study sets and planner items
 app.get('/api/search', auth, (req, res) => {
   const q = String(req.query.q || '').toLowerCase().trim();
   const d = store.db(req.user.id);
-  if (!q) return res.json([]);
-  const hits = d.pages.filter(p => (p.title + ' ' + p.transcript + ' ' + (p.keyPoints || []).join(' ')).toLowerCase().includes(q))
-    .map(p => { const nb = d.notebooks.find(n => n.id === p.notebookId); const t = p.transcript || ''; const i = t.toLowerCase().indexOf(q); return { id: p.id, notebookId: p.notebookId, notebook: nb?.name, index: p.index, title: p.title, snippet: i >= 0 ? t.slice(Math.max(0, i - 60), i + 80) : t.slice(0, 140) }; });
-  res.json(hits.slice(0, 50));
+  if (!q) return res.json({ pages: [], study: [], events: [] });
+  const nbFilter = req.query.notebook ? String(req.query.notebook) : null;
+  const pages = d.pages.filter(p => (!nbFilter || p.notebookId === nbFilter) && (p.title + ' ' + p.transcript + ' ' + (p.keyPoints || []).join(' ') + ' ' + (p.vocab || []).map(v => v.term).join(' ')).toLowerCase().includes(q))
+    .map(p => { const nb = store.findNb(d, p.notebookId); const t = plain(p.transcript, 100000); const i = t.toLowerCase().indexOf(q); return { id: p.id, notebookId: p.notebookId, notebook: nb?.name, color: nb?.color || 'navy', index: p.index, title: p.title, rev: p.rev || 0, snippet: i >= 0 ? t.slice(Math.max(0, i - 60), i + 90) : t.slice(0, 150) }; });
+  const study = nbFilter ? [] : d.study.filter(s => (s.title + ' ' + s.subject + ' ' + s.topic + ' ' + (s.cards || []).map(c => c.front).join(' ')).toLowerCase().includes(q)).map(s => ({ id: s.id, title: s.title, subject: s.subject || '', cards: (s.cards || []).length, tests: (s.tests || []).length }));
+  const events = nbFilter ? [] : d.events.filter(e => (e.title + ' ' + e.subject + ' ' + e.notes).toLowerCase().includes(q)).map(e => ({ id: e.id, title: e.title, type: e.type, date: e.date, done: e.done }));
+  res.json({ pages: pages.slice(0, 50), study: study.slice(0, 10), events: events.slice(0, 10) });
 });
 
 
@@ -378,7 +507,7 @@ app.post('/api/pages/:id/analyze', auth, async (req, res) => {
   const p = d.pages.find(p => p.id === req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const nb = d.notebooks.find(n => n.id === p.notebookId);
-  const data = (await store.readImageBase64(req.user.id, p.id, 'enh')) || (await store.readImageBase64(req.user.id, p.id, 'orig'));
+  const data = await store.readImageForAI(req.user.id, p.id);
   if (!data) return res.status(400).json({ error: 'No image' });
   p.status = 'analyzing'; store.save(req.user.id);
   const today = new Date(); const todayISO = today.toISOString().slice(0, 10);
@@ -432,7 +561,7 @@ app.post('/api/pages/:id/check', auth, async (req, res) => {
   const p = d.pages.find(p => p.id === req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const nb = d.notebooks.find(n => n.id === p.notebookId);
-  const data = (await store.readImageBase64(req.user.id, p.id, 'enh')) || (await store.readImageBase64(req.user.id, p.id, 'orig'));
+  const data = await store.readImageForAI(req.user.id, p.id);
   if (!data) return res.status(400).json({ error: 'No image' });
   const hint = String(req.body.hint || '').slice(0, 500);
   try {
@@ -492,7 +621,7 @@ app.post('/api/pages/:id/graded', auth, async (req, res) => {
   const p = d.pages.find(p => p.id === req.params.id);
   if (!p) return res.status(404).json({ error: 'Not found' });
   const nb = d.notebooks.find(n => n.id === p.notebookId);
-  const data = (await store.readImageBase64(req.user.id, p.id, 'enh')) || (await store.readImageBase64(req.user.id, p.id, 'orig'));
+  const data = await store.readImageForAI(req.user.id, p.id);
   if (!data) return res.status(400).json({ error: 'No image' });
   try {
     const ext = await ai.completeJSON({
@@ -510,6 +639,60 @@ Return ONLY JSON: {"testName":"...","score":"e.g. 17/20 or 85% or empty","items"
     d.study.push(st); store.save(req.user.id);
     res.json({ study: st, missed: missed.length, total: items.length });
   } catch (e) { console.error('graded:', e.message); res.status(500).json({ error: e.message }); }
+});
+
+// ---------- page AI tools: explain simply / summary / translate / practice questions (cached on the page) ----------
+const PAGE_TOOLS = {
+  explain: { label: 'Explain it simply', prompt: 'Explain everything on this page like a friendly tutor talking to a student who missed the class. Go idea by idea in the order of the notes, use simple words and one concrete example per idea, and finish with "The 3 things to remember". Markdown, LaTeX for math.' },
+  summary: { label: 'Summary', prompt: 'Write a tight summary of this page: a 2-sentence overview, then 5-8 bullet points of the key facts/formulas, then any vocabulary as a short list. Markdown, LaTeX for math.' },
+  questions: { label: 'Practice questions', prompt: 'Write 6 practice questions that test exactly what is on this page (mix of recall and apply), then an "Answers" section with short worked answers. Markdown, LaTeX for math.' },
+  translate: { label: 'Translate', prompt: (lang) => `Translate the full notes on this page into ${lang}. Keep the same structure (headings, bullets, tables) and keep math/formulas exactly as LaTeX. After the translation add a short glossary of 5-10 key terms as "term → translation".` },
+};
+app.post('/api/pages/:id/tool', auth, async (req, res) => {
+  const d = store.db(req.user.id); const p = store.findPage(d, req.params.id); if (!p) return err(res, 404, 'Not found');
+  const tool = PAGE_TOOLS[req.body.tool]; if (!tool) return err(res, 400, 'Unknown tool');
+  const lang = str(req.body.lang || 'Spanish', 40); const key = req.body.tool + (req.body.tool === 'translate' ? ':' + lang : '');
+  p.tools ||= {};
+  if (p.tools[key] && !req.body.fresh) return res.json({ key, text: p.tools[key].text, at: p.tools[key].at, cached: true });
+  if (!p.transcript) return err(res, 400, 'This page has no digital copy yet — press Re-read first.');
+  const nb = store.findNb(d, p.notebookId);
+  try {
+    const text = await ai.complete({ system: `You help a student understand their own notebook notes. Notebook: "${nb?.name || ''}" (subject: ${nb?.subject || 'unknown'}). Write clear Markdown.\n${MATH_RULES}`, prompt: `${typeof tool.prompt === 'function' ? tool.prompt(lang) : tool.prompt}\n\nTHE PAGE (${p.title || 'untitled'}):\n${p.transcript}${p.keyPoints?.length ? '\n\nKEY POINTS: ' + p.keyPoints.join(' | ') : ''}`, maxTokens: 3500, effort: 'low' });
+    p.tools[key] = { text, at: Date.now() }; store.save(req.user.id);
+    res.json({ key, text, at: p.tools[key].at });
+  } catch (e) { console.error('page tool:', e.message); err(res, 500, e.message); }
+});
+// "Ask about this page" — a tutor chat scoped to one page (SSE)
+app.post('/api/pages/:id/ask', auth, async (req, res) => {
+  const d = store.db(req.user.id); const p = store.findPage(d, req.params.id); if (!p) return err(res, 404, 'Not found');
+  const { messages } = req.body || {};
+  if (!Array.isArray(messages) || !messages.length) return err(res, 400, 'messages required');
+  const nb = store.findNb(d, p.notebookId);
+  res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.flushHeaders();
+  const send = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+  let reply = '';
+  try {
+    await ai.stream({
+      system: `You are a patient tutor helping a student with ONE page of their notes (notebook "${nb?.name || ''}", subject ${nb?.subject || 'unknown'}). Answer from the page first; add background only when needed and say so. Keep replies short, use Markdown, write math in LaTeX ($...$). Sometimes end with a quick check question.\n${MATH_RULES}\n\nTHE PAGE (${p.title || 'untitled'}):\n${p.transcript || '(no digital copy)'}${p.keyPoints?.length ? '\n\nKEY POINTS: ' + p.keyPoints.join(' | ') : ''}`,
+      messages: messages.slice(-12).map(m => ({ role: m.role, content: String(m.content) })),
+      onText: (t) => { reply += t; send({ t }); },
+    });
+    p.chat = [...messages.slice(-30), { role: 'assistant', content: reply }].slice(-30); store.save(req.user.id);
+  } catch (e) { send({ error: 'AI error: ' + e.message }); }
+  send({ done: true }); res.end();
+});
+
+// ---------- assignment breakdown: homework/project → small steps with time estimates ----------
+app.post('/api/events/:id/breakdown', auth, async (req, res) => {
+  const d = store.db(req.user.id); const ev = store.findEvent(d, req.params.id); if (!ev) return err(res, 404, 'Not found');
+  try {
+    const out = await ai.completeJSON({ system: 'You are a study coach who breaks school assignments into small, concrete steps a student can check off. Output ONLY JSON.',
+      prompt: `Assignment: "${ev.title}" (${ev.type}${ev.subject ? ', ' + ev.subject : ''}), due ${ev.date}. Notes from the student: ${ev.notes || '(none)'}. Today is ${isoDate()}.
+Break it into 3-8 concrete steps in order, each doable in one sitting, with a realistic minute estimate. If it is a test/quiz, the steps are a study plan (review notes, flashcards, practice test, weak spots, final review).
+Return ONLY JSON: {"subtasks":[{"text":"...","minutes":20}]}`, maxTokens: 800, effort: 'low' });
+    ev.subtasks = (out.subtasks || []).filter(s => s && s.text).slice(0, 10).map(s => ({ id: store.uid(), text: str(s.text, 140), minutes: clampInt(s.minutes, 5, 240, 20), done: false }));
+    store.save(req.user.id); res.json({ subtasks: ev.subtasks });
+  } catch (e) { console.error('breakdown:', e.message); err(res, 500, e.message); }
 });
 
 // ---------- cram mode: one compact 20-minute plan ----------
@@ -575,6 +758,8 @@ app.patch('/api/events/:id', auth, (req, res) => {
   const ev = d.events.find(e => e.id === req.params.id);
   if (!ev) return res.status(404).json({ error: 'Not found' });
   for (const k of ['title', 'type', 'subject', 'date', 'time', 'notes', 'notebookId', 'done', 'studyId']) if (req.body[k] !== undefined) ev[k] = req.body[k];
+  if (Array.isArray(req.body.subtasks)) ev.subtasks = req.body.subtasks.filter(s => s && s.text).slice(0, 12).map(s => ({ id: s.id || store.uid(), text: str(s.text, 140), minutes: clampInt(s.minutes, 1, 600, 20), done: !!s.done }));
+  if (req.body.done === true) { ev.doneAt = Date.now(); logActivity(req.user.id, 'done'); }
   store.save(req.user.id); res.json(ev);
 });
 app.delete('/api/events/:id', auth, (req, res) => {
@@ -616,7 +801,7 @@ function studyContext(d, s, pageIds) {
   const lt = linksText(s);
   return `SUBJECT: ${s.subject || 'unknown'}\nTOPIC / TEST: ${s.title}${s.topic ? '\nTOPIC DETAILS: ' + s.topic : ''}\n\nSTUDENT'S NOTEBOOK NOTES:\n${notes || '(no notebook pages selected — use the topic' + (lt ? ' and the web sources' : '') + ')'}${lt ? '\n\nWEB SOURCES THE STUDENT ADDED (use these as material too):\n' + lt : ''}`;
 }
-app.get('/api/study', auth, (req, res) => res.json(store.db(req.user.id).study.map(s => ({ ...s, chat: undefined }))));
+app.get('/api/study', auth, (req, res) => res.json(store.db(req.user.id).study.map(studySummary)));
 app.post('/api/study', auth, async (req, res) => {
   const { title, subject, topic, pageIds, eventId, links } = req.body || {};
   if (!title) return res.status(400).json({ error: 'Title required' });
@@ -627,9 +812,21 @@ app.post('/api/study', auth, async (req, res) => {
   if (eventId) { const ev = d.events.find(e => e.id === eventId); if (ev) ev.studyId = s.id; }
   store.save(req.user.id); res.json(s);
 });
+// full set + the source pages resolved (id/index/title/notebook) so the client never has to load whole notebooks
 app.get('/api/study/:id', auth, (req, res) => {
-  const s = store.db(req.user.id).study.find(s => s.id === req.params.id);
-  s ? res.json(s) : res.status(404).json({ error: 'Not found' });
+  const d = store.db(req.user.id); const s = store.findStudy(d, req.params.id);
+  if (!s) return err(res, 404, 'Not found');
+  const pages = (s.pageIds || []).map(id => store.findPage(d, id)).filter(Boolean).sort((a, b) => a.notebookId.localeCompare(b.notebookId) || a.index - b.index).map(p => ({ id: p.id, index: p.index, title: p.title || '', notebookId: p.notebookId, notebook: store.findNb(d, p.notebookId)?.name || '' }));
+  res.json({ ...s, pages });
+});
+// add flashcards from the vocab on the set's pages — instant, no AI
+app.post('/api/study/:id/vocab-cards', auth, (req, res) => {
+  const d = store.db(req.user.id); const s = store.findStudy(d, req.params.id); if (!s) return err(res, 404, 'Not found');
+  const pages = (s.pageIds || []).map(id => store.findPage(d, id)).filter(Boolean);
+  const added = vocabCards(pages, s.cards || []);
+  if (!added.length) return err(res, 400, pages.length ? 'No new vocabulary on these pages.' : 'Add notebook pages to this set first (Sources).');
+  s.cards = [...(s.cards || []), ...added]; s.updatedAt = Date.now(); store.save(req.user.id); logActivity(req.user.id, 'cards');
+  res.json({ cards: s.cards, added: added.length });
 });
 app.patch('/api/study/:id', auth, async (req, res) => {
   const d = store.db(req.user.id);
@@ -932,7 +1129,7 @@ app.post('/api/study/:id/cards', auth, async (req, res) => {
 Return ONLY JSON: {"cards":[{"front":"...","back":"...","hint":"optional short hint"}]}`,
       maxTokens: 5000, effort: 'medium',
     });
-    const cards = (out.cards || []).filter(c => c && c.front && c.back).map(c => ({ id: store.uid(), front: String(c.front), back: String(c.back), hint: c.hint ? String(c.hint) : '', box: 0, seen: 0 }));
+    const cards = (out.cards || []).filter(c => c && c.front && c.back).map(c => ({ id: store.uid(), front: String(c.front), back: String(c.back), hint: c.hint ? String(c.hint) : '', box: 0, seen: 0, due: 0 }));
     s.cards = [...(s.cards || []), ...cards]; s.updatedAt = Date.now(); store.save(req.user.id);
     res.json({ cards: s.cards });
   } catch (e) { console.error('cards:', e.message); res.status(500).json({ error: e.message }); }
@@ -955,6 +1152,72 @@ app.post('/api/study/:id/chat', auth, async (req, res) => {
     s.chat = [...messages.slice(-40), { role: 'assistant', content: reply }].slice(-40); store.save(req.user.id);
   } catch (e) { send({ error: 'AI error: ' + e.message }); }
   send({ done: true }); res.end();
+});
+
+// ---------- spaced repetition: one daily review queue across every study set ----------
+// Leitner boxes 0-5. box ≥ 1 counts as "known" (same meaning the flashcard tab always had).
+const BOX_DAYS = [0, 1, 3, 7, 14, 30];
+const dueCards = (d, now = Date.now()) => { const out = []; for (const s of d.study) for (const c of s.cards || []) if ((c.due || 0) <= now) out.push({ setId: s.id, set: s.title, subject: s.subject || '', id: c.id, front: c.front, back: c.back, hint: c.hint || '', box: c.box || 0, due: c.due || 0 }); return out.sort((a, b) => a.due - b.due || a.box - b.box); };
+app.get('/api/review', auth, (req, res) => {
+  const d = store.db(req.user.id); const now = Date.now();
+  const due = dueCards(d, now); const limit = clampInt(req.query.limit, 1, 200, 40);
+  const total = d.study.reduce((n, s) => n + (s.cards || []).length, 0);
+  const endOfDay = now + 86400000; let dueSoon = 0; const byBox = [0, 0, 0, 0, 0, 0];
+  for (const s of d.study) for (const c of s.cards || []) { byBox[Math.min(5, c.box || 0)]++; if ((c.due || 0) > now && (c.due || 0) <= endOfDay) dueSoon++; }
+  const queue = req.query.set ? due.filter(c => c.setId === req.query.set) : due;
+  res.json({ cards: queue.slice(0, limit), due: due.length, dueSoon, total, byBox, sets: d.study.filter(s => (s.cards || []).length).map(s => ({ id: s.id, title: s.title, due: due.filter(c => c.setId === s.id).length })) });
+});
+app.post('/api/review/grade', auth, (req, res) => {
+  const d = store.db(req.user.id); const s = store.findStudy(d, req.body.setId); const c = s?.cards?.find(x => x.id === req.body.cardId);
+  if (!c) return err(res, 404, 'Card not found');
+  const now = Date.now(); const r = String(req.body.rating); let box = c.box || 0;
+  if (r === 'again') { box = 0; c.due = now + 10 * 60000; c.lapses = (c.lapses || 0) + 1; }
+  else if (r === 'hard') { box = Math.max(1, box); c.due = now + 0.5 * BOX_DAYS[box] * 86400000 || now + 12 * 3600000; }
+  else if (r === 'easy') { box = Math.min(5, box + 2); c.due = now + BOX_DAYS[box] * 1.3 * 86400000; }
+  else { box = Math.min(5, box + 1); c.due = now + BOX_DAYS[box] * 86400000; } // good
+  c.box = box; c.seen = (c.seen || 0) + 1; c.lastAt = now; s.updatedAt = now;
+  store.save(req.user.id); logActivity(req.user.id, 'cards');
+  res.json({ box, due: c.due, remaining: dueCards(d, now).length });
+});
+
+// ---------- study plan: day-by-day schedule until the test (AI), with checkable tasks ----------
+app.post('/api/study/:id/plan', auth, async (req, res) => {
+  const [d, s] = getStudy(req, res); if (!s) return;
+  const ev = s.eventId ? store.findEvent(d, s.eventId) : null;
+  const ctx = todayCtx(); const todayISO = isISODate(req.body.today) ? req.body.today : ctx.todayISO; // the client's local date wins
+  const dow = new Date(todayISO + 'T12:00:00Z').toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' });
+  const endISO = ev?.date && ev.date > todayISO ? ev.date : isoDate(new Date(Date.now() + 7 * 86400000));
+  const days = Math.max(1, Math.min(21, Math.round((Date.parse(endISO) - Date.parse(todayISO)) / 86400000)));
+  const perDay = clampInt(req.body.minutesPerDay, 10, 180, 30);
+  try {
+    const out = await ai.completeJSON({ system: 'You are a study coach who writes realistic, specific day-by-day study plans for students. Output ONLY JSON.',
+      prompt: `${studyContext(d, s).slice(0, 12000)}\n\nToday is ${dow} ${todayISO}. ${ev ? `The test "${ev.title}" is on ${ev.date}.` : `Plan for the next ${days} days.`} The student has about ${perDay} minutes per day. Available in this app: study sheet${s.sheet ? ' (already made)' : ''}, flashcards (${(s.cards || []).length} cards), practice tests (${(s.tests || []).length} made), tutor chat, cram mode, daily flashcard review.
+Write a plan with one entry per day from ${todayISO} up to ${ev ? 'the day before the test (plus a light "test day" entry)' : 'day ' + days}: 2-4 tasks per day, each a specific action tied to the actual topics in the notes (e.g. "Flashcards: cell organelles (10 min)", "Practice test: 10 questions on fractions", "Re-read page on photosynthesis and rewrite the 3 steps from memory"). Spread topics out, build up to a full practice test, finish with review of weak spots. Task kinds: read | cards | test | sheet | tutor | review | other.
+Return ONLY JSON: {"days":[{"date":"YYYY-MM-DD","focus":"short theme for the day","tasks":[{"text":"...","kind":"cards","minutes":10}]}]}`, maxTokens: 3500, effort: 'low' });
+    const kinds = ['read', 'cards', 'test', 'sheet', 'tutor', 'review', 'other'];
+    const plan = { createdAt: Date.now(), minutesPerDay: perDay, endISO, days: (out.days || []).filter(x => isISODate(x?.date) && x.date >= todayISO && x.date <= endISO).slice(0, 22).map(x => ({ date: x.date, focus: str(x.focus, 80), tasks: (x.tasks || []).filter(t => t && t.text).slice(0, 5).map(t => ({ id: store.uid(), text: str(t.text, 160), kind: kinds.includes(t.kind) ? t.kind : 'other', minutes: clampInt(t.minutes, 3, 180, 15), done: false })) })).filter(x => x.tasks.length) };
+    if (!plan.days.length) throw new Error('The AI returned an empty plan — try again');
+    s.plan = plan; s.updatedAt = Date.now(); store.save(req.user.id); logActivity(req.user.id, 'study');
+    res.json(plan);
+  } catch (e) { console.error('plan:', e.message); err(res, 500, e.message); }
+});
+app.patch('/api/study/:id/plan', auth, (req, res) => {
+  const [d, s] = getStudy(req, res); if (!s) return;
+  if (req.body.clear) { s.plan = null; store.save(req.user.id); return res.json({ ok: true }); }
+  for (const day of s.plan?.days || []) for (const t of day.tasks) if (t.id === req.body.taskId) { t.done = !!req.body.done; if (t.done) logActivity(req.user.id, 'plan'); }
+  store.save(req.user.id); res.json(s.plan);
+});
+
+// ---------- grades: classes with weighted categories; the math happens on the client ----------
+app.get('/api/grades', auth, (req, res) => res.json(store.db(req.user.id).grades || { classes: [] }));
+app.put('/api/grades', auth, (req, res) => {
+  const d = store.db(req.user.id); const inp = req.body || {};
+  const classes = (Array.isArray(inp.classes) ? inp.classes : []).slice(0, 30).map(c => ({
+    id: c.id || store.uid(), name: str(c.name, 60) || 'Class', subject: str(c.subject, 60), color: str(c.color, 20) || 'navy', target: clampInt(c.target, 0, 100, 90), scale: c.scale === 'plusminus' ? 'plusminus' : 'standard',
+    categories: (Array.isArray(c.categories) ? c.categories : []).slice(0, 20).map(k => ({ id: k.id || store.uid(), name: str(k.name, 40) || 'Category', weight: Math.max(0, Math.min(100, Number(k.weight) || 0)), drop: clampInt(k.drop, 0, 5, 0) })),
+    entries: (Array.isArray(c.entries) ? c.entries : []).slice(0, 500).map(e => ({ id: e.id || store.uid(), catId: str(e.catId, 60), title: str(e.title, 80), score: Number(e.score) || 0, max: Math.max(0.01, Number(e.max) || 100), date: isISODate(e.date) ? e.date : isoDate(), note: str(e.note, 200) })),
+  }));
+  d.grades = { classes, updatedAt: Date.now() }; store.save(req.user.id); res.json(d.grades);
 });
 
 // SPA fallback

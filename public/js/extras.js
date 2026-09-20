@@ -5,7 +5,7 @@ import { state, api, stream, $, $$, esc, h, md, mdi, mdPage, hydrateFigures, ico
 export async function progressView() {
   const { shell } = await import('./app.js');
   const main = shell('Progress', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
-  const p = await api('/progress');
+  const p = await api('/progress'); if (!$('#view')?.contains(main) && !document.contains(main)) return;
   const days = []; for (let i = 83; i >= 0; i--) { const d = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10); days.push(d); }
   const val = (d) => { const a = p.activity[d]; return a ? Object.values(a).reduce((x, y) => x + y, 0) : 0; };
   const max = Math.max(1, ...days.map(val));
@@ -38,13 +38,15 @@ export async function sharedView({ token }) {
   let data;
   try { data = await api('/shared/' + token); } catch (e) { render(`<div class="auth-main" style="min-height:100vh"><div class="empty"><div class="big">🔗</div><h3>This link isn't valid anymore</h3><p>${esc(e.message)}</p><a class="btn" href="#/">Open WorkBook</a></div></div>`); return; }
   const img = (pid, kind = 'enh', rev = 0) => `/api/shared/${token}/image/${pid}?kind=${kind}&r=${rev}`;
-  const head = (title, sub) => `<div class="shared-head"><a class="brand" href="#/" style="text-decoration:none;color:inherit">${icon('book')}<b>WorkBook</b></a><div><h1 style="font-size:24px">${esc(title)}</h1><div class="muted small">${esc(sub)} · shared by ${esc(data.by || 'a student')}</div></div><a class="btn primary sm" href="#/">${state.user ? 'My WorkBook' : 'Make your own'}</a></div>`;
+  const head = (title, sub) => `<div class="shared-head"><a class="brand" href="#/" style="text-decoration:none;color:inherit">${icon('book')}<b>WorkBook</b></a><div><h1 style="font-size:24px">${esc(title)}</h1><div class="muted small">${esc(sub)} · shared by ${esc(data.by || 'a student')}</div></div><div class="btn-row">${state.user ? `<button class="btn sm" id="saveCopy">${icon('download')} Save a copy to my WorkBook</button>` : ''}<a class="btn primary sm" href="#/">${state.user ? 'My WorkBook' : 'Make your own'}</a></div></div>`;
+  const wireCopy = () => { const b = $('#saveCopy'); if (b) b.onclick = async () => { busy(b, true, 'Copying…'); try { const r = await api('/shared/' + token + '/copy', { body: {} }); invalidate(); toast('Saved to your WorkBook', 'ok'); go(r.kind === 'study' ? '#/study/' + r.id : '#/notebook/' + r.id); } catch (e) { toast(e.message, 'err'); busy(b, false); } }; };
   if (data.kind === 'notebook') {
     const nb = data.notebook;
     render(`<div class="shared">${head(nb.name, (nb.subject || 'Notebook') + ' · ' + nb.pages.length + ' pages')}
       ${nb.pages.map(p => `<section class="shared-page"><div class="viewer"><div><img src="${img(p.id, 'enh', p.rev)}" style="width:100%;border-radius:10px;border:1px solid var(--line)"></div><div><h2>${esc(p.title || 'Page ' + p.index)} <span class="muted small">p.${p.index}</span></h2><div class="paper holes"><div class="md" id="sp-${p.id}">${p.transcript ? mdPage(p.transcript, { ...p, id: p.id }).replace(new RegExp('/api/pages/' + p.id + '/image\\?kind=enh&r=\\d+', 'g'), img(p.id, 'enh', p.rev)) : '<span class="muted">No digital copy</span>'}</div></div>${p.keyPoints?.length ? `<div class="card" style="margin-top:10px"><b>Key points</b><ul>${p.keyPoints.map(k => `<li>${mdi(k)}</li>`).join('')}</ul></div>` : ''}</div></div></section>`).join('')}</div>`);
     // figures: hydrate using the shared image url
     for (const p of nb.pages) if (p.figures?.length) hydrateFiguresFrom($('#sp-' + p.id), p, img(p.id, 'enh', p.rev));
+    wireCopy();
     return;
   }
   const s = data.study; let tab = s.sheet ? 'sheet' : s.cards.length ? 'cards' : 'tests';
@@ -53,6 +55,7 @@ export async function sharedView({ token }) {
       <div class="tabs">${[['sheet', 'Study sheet'], ['cards', 'Flashcards (' + s.cards.length + ')'], ['tests', 'Practice tests (' + s.tests.length + ')']].map(([k, l]) => `<button data-t="${k}" class="${tab === k ? 'active' : ''}">${l}</button>`).join('')}</div>
       <div id="body"></div></div>`);
     $$('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; draw(); });
+    wireCopy();
     const body = $('#body');
     if (tab === 'sheet') body.innerHTML = s.sheet ? `<div class="paper holes"><div class="md">${md(s.sheet)}</div></div>` : '<div class="empty">No study sheet in this set.</div>';
     else if (tab === 'cards') {

@@ -1,18 +1,21 @@
-import { state, api, stream, $, $$, esc, h, md, mdi, icon, toast, modal, confirm, busy, fmtDate, countdown, daysUntil, ago, loadNotebooks, loadEvents, loadStudy, invalidate, go, dispatch } from './core.js';
-import { shell } from './app.js';
+import { state, api, stream, $, $$, esc, h, md, mdi, icon, toast, modal, confirm, busy, fmtDate, countdown, daysUntil, ago, loadNotebooks, loadEvents, loadStudy, invalidate, go, dispatch, setKeys, loading, plural, fmtMin, download, todayISO, navId, stale } from './core.js';
+import { shell, updateReviewBadge } from './app.js';
 import { cramTab, voice, shareThing } from './extras.js';
 import { fileToCanvas, scaleCanvas, toDataURL } from './imageproc.js';
 
 // ---------- list ----------
 export async function studyListView(_, q = {}) {
-  const main = shell('Study', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
-  const [sets, evs] = await Promise.all([loadStudy(true), loadEvents(true)]);
-  const today = new Date().toISOString().slice(0, 10);
+  const main = shell('Study', loading());
+  const seq = navId();
+  const [sets, evs] = await Promise.all([loadStudy(true), loadEvents(true)]); if (stale(seq)) return;
+  const today = todayISO();
   const testsSoon = evs.filter(e => !e.done && (e.type === 'test' || e.type === 'quiz') && e.date >= today && !e.studyId).slice(0, 4);
-  main.innerHTML = `<div class="page-head"><div><h1>Study</h1><div class="sub">Study sheets from your notes, extra help from the web, practice tests and flashcards — all made by AI from what you scanned.</div></div><button class="btn primary" id="newSet">${icon('plus')} New study set</button></div>
-    ${testsSoon.length ? `<div class="card" style="margin-bottom:18px;background:linear-gradient(135deg,#fff5f2,#fff);border-color:#f7d5cd"><h3>${icon('zap')} Tests coming up without a study set</h3><div class="btn-row" style="margin-top:8px">${testsSoon.map(e => `<a class="btn sm" href="#/study?new=1&event=${e.id}">${esc(e.title)} · <span class="muted">${countdown(e.date)}</span></a>`).join('')}</div></div>` : ''}
-    <div class="study-list grid cols-2">${sets.sort((a, b) => b.updatedAt - a.updatedAt).map(s => { const ev = evs.find(e => e.id === s.eventId); const best = Math.max(0, ...s.tests.flatMap(t => t.attempts.map(a => a.percent))); return `<div class="card" onclick="location.hash='#/study/${s.id}'"><div class="icon">${icon('study')}</div><div style="flex:1;min-width:0"><b>${esc(s.title)}</b><div class="muted small">${esc(s.subject || '')}${ev ? ' · ' + fmtDate(ev.date) + ' (' + countdown(ev.date) + ')' : ''}</div><div class="chips" style="margin-top:6px">${s.sheet ? '<span class="chip green">📝 sheet</span>' : ''}${s.online ? '<span class="chip blue">🌐 online</span>' : ''}${s.tests.length ? `<span class="chip amber">✅ ${s.tests.length} test${s.tests.length === 1 ? '' : 's'}${best ? ' · best ' + best + '%' : ''}</span>` : ''}${s.cards.length ? `<span class="chip purple">🃏 ${s.cards.length} cards</span>` : ''}${!s.sheet && !s.online && !s.tests.length && !s.cards.length ? '<span class="chip">new</span>' : ''}</div></div>${icon('chevR', 'muted')}</div>`; }).join('')}</div>
+  const due = sets.reduce((n, s) => n + (s.cardsDue || 0), 0); updateReviewBadge(due);
+  main.innerHTML = `<div class="page-head"><div><h1>Study</h1><div class="sub">Study sheets from your notes, help from the web, practice tests, flashcards, a plan and a tutor, all built from what you scanned.</div></div><div class="btn-row">${due ? `<a class="btn mark" href="#/review">${icon('review')} Review ${due} due</a>` : ''}<button class="btn primary" id="newSet">${icon('plus')} New study set</button></div></div>
+    ${testsSoon.length ? `<div class="card warm" style="margin-bottom:18px"><h3>${icon('zap')} Tests coming up without a study set</h3><div class="btn-row" style="margin-top:8px">${testsSoon.map(e => `<a class="btn sm" href="#/study?new=1&event=${e.id}">${esc(e.title)} · <span class="muted">${countdown(e.date)}</span></a>`).join('')}</div></div>` : ''}
+    <div class="study-list grid cols-2">${sets.sort((a, b) => b.updatedAt - a.updatedAt).map(s => { const ev = evs.find(e => e.id === s.eventId); return `<div class="card" role="link" tabindex="0" data-id="${s.id}"><div class="icon">${icon('study')}</div><div style="flex:1;min-width:0"><b>${esc(s.title)}</b><div class="muted small">${esc(s.subject || '')}${ev ? ' · ' + fmtDate(ev.date) + ' (' + countdown(ev.date) + ')' : ''}</div><div class="chips" style="margin-top:6px">${s.hasSheet ? '<span class="chip green">📝 sheet</span>' : ''}${s.hasOnline ? '<span class="chip blue">🌐 online</span>' : ''}${s.testCount ? `<span class="chip amber">✅ ${plural(s.testCount, 'test')}${s.best != null ? ' · best ' + s.best + '%' : ''}</span>` : ''}${s.cardCount ? `<span class="chip purple">🃏 ${s.cardCount} cards${s.cardsDue ? ' · ' + s.cardsDue + ' due' : ''}</span>` : ''}${s.planTotal ? `<span class="chip teal">📆 plan ${s.planDone}/${s.planTotal}</span>` : ''}${!s.hasSheet && !s.hasOnline && !s.testCount && !s.cardCount ? '<span class="chip">new</span>' : ''}</div></div>${icon('chevR', 'muted')}</div>`; }).join('')}</div>
     ${!sets.length ? `<div class="empty"><div class="big">🎓</div><h3>No study sets yet</h3><p>Pick a test from your planner (or any topic), choose the notebook pages it covers, and WorkBook builds your study kit.</p><button class="btn primary" id="newSet2">${icon('plus')} Create a study set</button></div>` : ''}`;
+  $$('.study-list .card').forEach(c => { c.onclick = () => go('#/study/' + c.dataset.id); c.onkeydown = (e) => { if (e.key === 'Enter') c.click(); }; });
   $('#newSet').onclick = () => openNewStudy(q);
   if ($('#newSet2')) $('#newSet2').onclick = () => openNewStudy(q);
   if (q.new) openNewStudy(q);
@@ -36,7 +39,7 @@ export async function openNewStudy(q = {}) {
     const id = $('#stNb', el).value; const box = $('#srcPages', el);
     if (!id) { box.innerHTML = '<span class="muted small">Pick a notebook above.</span>'; return; }
     box.innerHTML = '<span class="spinner"></span>';
-    const nb = await api('/notebooks/' + id);
+    const nb = await api('/notebooks/' + id + '?lite=1');
     if (!nb.pages.length) { box.innerHTML = `<span class="muted small">No scanned pages in this notebook yet — <a href="#/scan/${nb.id}">scan some</a>.</span>`; return; }
     box.innerHTML = nb.pages.map(p => `<label><input type="checkbox" value="${p.id}" ${chosen.has(p.id) ? 'checked' : ''}><span>p.${p.index} ${esc(p.title || '')}</span></label>`).join('');
     $$('input', box).forEach(c => c.onchange = () => { c.checked ? chosen.add(c.value) : chosen.delete(c.value); $('#selCount', el).textContent = chosen.size + ' page(s) selected'; });
@@ -54,29 +57,58 @@ export async function openNewStudy(q = {}) {
 // ---------- study room ----------
 let tab = 'sheet';
 export async function studyView({ id }, q = {}) {
-  const main = shell('Study', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
-  const [s, evs] = await Promise.all([api('/study/' + id), loadEvents()]);
+  const main = shell('Study', loading());
+  const seq = navId();
+  const [s, evs] = await Promise.all([api('/study/' + id), loadEvents()]); if (stale(seq)) return;
   const ev = evs.find(e => e.id === s.eventId);
   if (q.tab) tab = q.tab;
   if (q.take) { const t = s.tests.find(t => t.id === q.take); if (t) { let cfg = {}; try { cfg = JSON.parse(sessionStorage.getItem('dwb_take_cfg') || '{}'); } catch {} sessionStorage.removeItem('dwb_take_cfg'); startTest(s, t, cfg); tab = 'test'; } }
-  const TABS = [['sheet', 'sheet', 'Study sheet'], ['online', 'globe', 'More online'], ['test', 'quiz', 'Practice tests'], ['cards', 'cards', 'Flashcards'], ['tutor', 'chat', 'Tutor'], ['cram', 'zap', '⚡ Cram']];
+  const TABS = [['plan', 'calendar', 'Plan'], ['sheet', 'sheet', 'Study sheet'], ['online', 'globe', 'More online'], ['test', 'quiz', 'Practice tests'], ['cards', 'cards', 'Flashcards'], ['tutor', 'chat', 'Tutor'], ['cram', 'zap', 'Cram']];
   if (q.fixit && s.graded) tab = 'cards';
+  if (tab === 'plan' && !s.plan && !q.tab) tab = 'sheet';
+  const due = (s.cards || []).filter(c => (c.due || 0) <= Date.now()).length;
   main.innerHTML = `<div class="crumbs"><a href="#/study">Study</a> › <span>${esc(s.title)}</span></div>
-    <div class="page-head"><div><h1>${esc(s.title)}</h1><div class="sub">${esc(s.subject || '')}${ev ? ` · ${fmtDate(ev.date)} · <b class="countdown ${daysUntil(ev.date) <= 3 ? 'urgent' : ''}">${countdown(ev.date)}</b>` : ''} · ${s.pageIds.length} notebook page${s.pageIds.length === 1 ? '' : 's'}${s.links?.length ? ` · 🔗 ${s.links.length} link${s.links.length === 1 ? '' : 's'}` : ''}</div></div>
-      <div class="btn-row"><button class="btn" id="shareSet">${icon('upload')} Share</button><button class="btn" id="editSrc">${icon('edit')} Sources</button><button class="btn danger icon" id="delSet">${icon('trash')}</button></div></div>
-    ${s.graded ? `<div class="card" style="margin-bottom:14px;background:linear-gradient(135deg,#fff5f2,#fff);border-color:#f7d5cd"><h3>📝 Fix-it set from your graded test${s.graded.testName ? ' — ' + esc(s.graded.testName) : ''}${s.graded.score ? ` <span class="chip red">${esc(s.graded.score)}</span>` : ''}</h3><div class="small" style="margin:6px 0">You missed <b>${s.graded.items.filter(i => i.markedWrong).length}</b> of ${s.graded.items.length}. Concepts to fix: ${(s.graded.missedConcepts || []).map(c => `<span class="chip amber">${esc(c)}</span>`).join(' ')}</div><details><summary class="small" style="cursor:pointer">See what was marked wrong</summary><div class="hw-items" style="margin-top:8px">${s.graded.items.filter(i => i.markedWrong).map(i => `<div class="hw-item wrong"><div class="hw-n">${esc(i.n)}</div><div class="hw-body"><div class="hw-q">${mdi(i.question)}</div><div class="small"><span class="muted">You wrote:</span> <b>${mdi(i.studentAnswer || '—')}</b>${i.correction ? ` · <span class="muted">Correct:</span> <b>${mdi(i.correction)}</b>` : ''}${i.concept ? ` · <span class="chip">${esc(i.concept)}</span>` : ''}</div></div></div>`).join('')}</div></details><div class="small muted" style="margin-top:6px">Flashcards and practice tests in this set are built from exactly these misses.</div></div>` : ''}
-    <div class="tabs">${TABS.map(([k, ic, l]) => `<button data-t="${k}" class="${tab === k ? 'active' : ''}">${icon(ic)} ${l}${k === 'test' && s.tests.length ? `<span class="cnt">${s.tests.length}</span>` : ''}${k === 'cards' && s.cards.length ? `<span class="cnt">${s.cards.length}</span>` : ''}</button>`).join('')}</div>
+    <div class="page-head"><div><h1>${esc(s.title)}</h1><div class="sub">${esc(s.subject || '')}${ev ? ` · ${fmtDate(ev.date)} · <b class="countdown ${daysUntil(ev.date) <= 3 ? 'urgent' : ''}">${countdown(ev.date)}</b>` : ''} · ${plural(s.pageIds.length, 'notebook page')}${s.links?.length ? ` · 🔗 ${plural(s.links.length, 'link')}` : ''}${s.copiedFrom ? ` · copied from ${esc(s.copiedFrom)}` : ''}</div></div>
+      <div class="btn-row">${due ? `<a class="btn mark" href="#/review?set=${s.id}">${icon('review')} Review ${due} due</a>` : ''}<button class="btn" id="editSrc">${icon('edit')} Sources</button><button class="btn" id="moreSet" aria-haspopup="menu">${icon('more')} More</button></div></div>
+    ${s.graded ? `<div class="card warm" style="margin-bottom:14px"><h3>📝 Fix-it set from your graded test${s.graded.testName ? ' — ' + esc(s.graded.testName) : ''}${s.graded.score ? ` <span class="chip red">${esc(s.graded.score)}</span>` : ''}</h3><div class="small" style="margin:6px 0">You missed <b>${s.graded.items.filter(i => i.markedWrong).length}</b> of ${s.graded.items.length}. Concepts to fix: ${(s.graded.missedConcepts || []).map(c => `<span class="chip amber">${esc(c)}</span>`).join(' ')}</div><details><summary class="small" style="cursor:pointer">See what was marked wrong</summary><div class="hw-items" style="margin-top:8px">${s.graded.items.filter(i => i.markedWrong).map(i => `<div class="hw-item wrong"><div class="hw-n">${esc(i.n)}</div><div class="hw-body"><div class="hw-q">${mdi(i.question)}</div><div class="small"><span class="muted">You wrote:</span> <b>${mdi(i.studentAnswer || '—')}</b>${i.correction ? ` · <span class="muted">Correct:</span> <b>${mdi(i.correction)}</b>` : ''}${i.concept ? ` · <span class="chip">${esc(i.concept)}</span>` : ''}</div></div></div>`).join('')}</div></details><div class="small muted" style="margin-top:6px">Flashcards and practice tests in this set are built from exactly these misses.</div></div>` : ''}
+    <div class="tabs" role="tablist">${TABS.map(([k, ic, l]) => `<button data-t="${k}" role="tab" aria-selected="${tab === k}" class="${tab === k ? 'active' : ''}">${icon(ic)} ${l}${k === 'test' && s.tests.length ? `<span class="cnt">${s.tests.length}</span>` : ''}${k === 'cards' && s.cards.length ? `<span class="cnt">${s.cards.length}</span>` : ''}${k === 'plan' && s.plan ? `<span class="cnt">${s.plan.days.reduce((n, d) => n + d.tasks.filter(t => t.done).length, 0)}/${s.plan.days.reduce((n, d) => n + d.tasks.length, 0)}</span>` : ''}</button>`).join('')}</div>
     <div id="tabBody"></div>`;
-  $$('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; $$('.tabs button').forEach(x => x.classList.toggle('active', x === b)); drawTab(s); });
+  $$('.tabs button').forEach(b => b.onclick = () => { tab = b.dataset.t; $$('.tabs button').forEach(x => { x.classList.toggle('active', x === b); x.setAttribute('aria-selected', x === b); }); drawTab(s); });
   $('#editSrc').onclick = () => editSources(s);
-  $('#shareSet').onclick = () => shareThing('study', s.id, s.title);
+  $('#moreSet').onclick = () => {
+    const mm = modal(`<h2>${esc(s.title)}</h2><div class="nb-list">
+      <button class="nb-row" id="mShare">${icon('upload')}<div><b>Share a read-only link</b><span class="muted small">Friends can read the sheet, flip the cards and take the tests</span></div></button>
+      <button class="nb-row" id="mVocab">${icon('cards')}<div><b>Add flashcards from vocab</b><span class="muted small">Instant, no AI: terms and definitions on this set's pages</span></div></button>
+      <button class="nb-row" id="mTsv" ${s.cards.length ? '' : 'disabled'}>${icon('download')}<div><b>Export flashcards (.tsv)</b><span class="muted small">Imports into Anki or Quizlet</span></div></button>
+      <button class="nb-row" id="mSheet" ${s.sheet ? '' : 'disabled'}>${icon('download')}<div><b>Download study sheet (.md)</b><span class="muted small">Markdown file</span></div></button>
+      <button class="nb-row" id="mDel" style="color:var(--red)">${icon('trash')}<div><b>Delete study set</b><span class="muted small">Sheet, tests, cards and plan are removed</span></div></button>
+    </div><div class="actions"><button class="btn" data-close>Close</button></div>`);
+    $('#mShare', mm.el).onclick = () => { mm.close(); shareThing('study', s.id, s.title); };
+    $('#mVocab', mm.el).onclick = async () => { busy($('#mVocab', mm.el), true, 'Adding…'); try { const r = await api(`/study/${s.id}/vocab-cards`, { body: {} }); s.cards = r.cards; deck = null; invalidate(); mm.close(); toast(`Added ${plural(r.added, 'card')}`, 'ok'); tab = 'cards'; $$('.tabs button').forEach(x => x.classList.toggle('active', x.dataset.t === 'cards')); drawTab(s); } catch (e) { toast(e.message, 'err'); busy($('#mVocab', mm.el), false); } };
+    $('#mTsv', mm.el).onclick = () => { mm.close(); const clean = (t) => String(t).replace(/[\t\n]+/g, ' ').trim(); download(`${s.title} flashcards.tsv`, s.cards.map(c => clean(c.front) + '\t' + clean(c.back)).join('\n'), 'text/tab-separated-values'); toast('Downloaded', 'ok'); };
+    $('#mSheet', mm.el).onclick = () => { mm.close(); download(`${s.title} study sheet.md`, s.sheet, 'text/markdown'); };
+    $('#mDel', mm.el).onclick = async () => { mm.close(); if (await confirm('Delete study set?', 'Sheet, tests, flashcards and plan will be removed.')) { await api.del('/study/' + s.id); invalidate(); go('#/study'); } };
+  };
   if (q.fixit && s.graded && !s.cards.length && sessionStorage.getItem('dwb_fixit')) { sessionStorage.removeItem('dwb_fixit'); toast('Making fix-it flashcards + a practice test…'); api(`/study/${s.id}/cards`, { body: { count: 12 } }).then(r => { s.cards = r.cards; if (tab === 'cards') drawTab(s); }).catch(() => {}); api(`/study/${s.id}/test`, { body: { count: 8, types: ['mc', 'short', 'fill'], about: 'only the concepts I missed on the graded test', difficulty: 3 } }).then(t => { s.tests.push(t); toast('Fix-it practice test ready ✅', 'ok'); }).catch(() => {}); }
-  $('#delSet').onclick = async () => { if (await confirm('Delete study set?', 'Sheet, tests and flashcards will be removed.')) { await api.del('/study/' + s.id); invalidate(); go('#/study'); } };
   drawTab(s);
 }
 function drawTab(s) {
   const body = $('#tabBody');
-  ({ sheet: sheetTab, online: onlineTab, test: testTab, cards: cardsTab, tutor: tutorTab, cram: cramTab }[tab] || sheetTab)(s, body);
+  ({ sheet: sheetTab, online: onlineTab, test: testTab, cards: cardsTab, tutor: tutorTab, cram: cramTab, plan: planTab }[tab] || sheetTab)(s, body);
+}
+
+// --- study plan (day by day until the test)
+function planTab(s, body) {
+  if (!s.plan) {
+    body.innerHTML = genBox({ emoji: '📆', title: 'Plan my studying', text: noSources(s) ? 'Add notebook pages or a topic first (Sources button), then AI can plan your days.' : 'AI spreads this material over the days until your test: what to read, which flashcards, when to take a practice test, and a final review of weak spots. Check tasks off as you go; today\'s tasks also show on Home.', btn: 'Build my plan', id: 'gen', extra: `<div class="field" style="max-width:260px;margin:0 auto 14px;text-align:left"><label for="ppd">Minutes per day</label><select id="ppd">${[15, 20, 30, 45, 60, 90].map(n => `<option value="${n}" ${n === 30 ? 'selected' : ''}>${n} minutes</option>`).join('')}</select></div>` });
+    $('#gen').onclick = async () => { busy($('#gen'), true, 'Planning your days…'); try { s.plan = await api(`/study/${s.id}/plan`, { body: { minutesPerDay: +$('#ppd').value, today: todayISO() } }); invalidate(); planTab(s, body); toast('Plan ready', 'ok'); } catch (e) { toast(e.message, 'err'); busy($('#gen'), false); } };
+    return;
+  }
+  const today = todayISO(); const total = s.plan.days.reduce((n, d) => n + d.tasks.length, 0), done = s.plan.days.reduce((n, d) => n + d.tasks.filter(t => t.done).length, 0);
+  body.innerHTML = `<div class="btn-row" style="justify-content:space-between;margin-bottom:12px"><div><b>${done}/${total} tasks done</b> <span class="muted small">· ${s.plan.minutesPerDay} min/day · through ${fmtDate(s.plan.endISO)}</span><div class="progress" style="width:220px;margin-top:6px"><i style="width:${total ? Math.round(100 * done / total) : 0}%"></i></div></div><button class="btn sm" id="replan">${icon('refresh')} New plan</button></div>
+    <div class="plan-days">${s.plan.days.map(d => `<div class="plan-day ${d.date === today ? 'today' : d.date < today ? 'past' : ''}"><div class="pd-head"><b>${d.date === today ? 'Today · ' : ''}${fmtDate(d.date)}</b><span>${esc(d.focus || '')} · ${fmtMin(d.tasks.reduce((n, t) => n + t.minutes, 0))}</span></div><div class="plan-today">${d.tasks.map(t => `<label class="task ${t.done ? 'done' : ''}"><input type="checkbox" data-task="${t.id}" ${t.done ? 'checked' : ''}><span class="txt">${esc(t.text)}<small>${fmtMin(t.minutes)}</small></span><span class="kind ${esc(t.kind)}">${esc(t.kind)}</span></label>`).join('')}</div></div>`).join('')}</div>`;
+  $$('.plan-days input').forEach(c => c.onchange = async () => { c.closest('.task').classList.toggle('done', c.checked); for (const d of s.plan.days) for (const t of d.tasks) if (t.id === c.dataset.task) t.done = c.checked; try { await api.patch(`/study/${s.id}/plan`, { taskId: c.dataset.task, done: c.checked }); } catch (e) { toast(e.message, 'err'); } });
+  $('#replan').onclick = async () => { if (await confirm('Build a new plan?', 'Replaces this plan and its checkmarks.', { danger: false, ok: 'New plan' })) { s.plan = null; await api.patch(`/study/${s.id}/plan`, { clear: true }); planTab(s, body); } };
 }
 function noSources(s) { return !s.pageIds.length && !s.topic; }
 function genBox({ emoji, title, text, btn, id, extra = '' }) {
@@ -162,7 +194,7 @@ When the test is ready, output it as ONE JSON code block in EXACTLY this format,
 {"id":"q5","type":"explain","question":"Explain ...","answer":"model answer with the key points","explanation":"rubric: what earns full credit","hint":"..."}]}
 
 Rules: "mc" has exactly 4 choices and "answer" is the index (0-3) of the correct choice. "tf" answer is true or false. "fill" has exactly one blank written as ____ in the question. Every question needs "answer", "explanation" and "hint". Number the ids q1, q2, q3… Write all math as LaTeX inside $...$ (escape backslashes for valid JSON, e.g. \\\\frac{1}{2}).`;
-async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } }
+async function copyText(t) { return (await import('./core.js')).copyText(t); }
 export function wireTestConfig(root = document) {
   const upd = () => { const st = $('input[name=tStyle]:checked', root)?.value; $$('.tstyle', root).forEach(l => l.classList.toggle('on', $('input', l).checked)); const tf = $('#typesField', root); if (tf) tf.style.display = st === 'standard' ? '' : 'none'; const pf = $('#promptField', root); if (pf) pf.classList.toggle('hidden', st !== 'prompt'); const imf = $('#importField', root); if (imf) imf.classList.toggle('hidden', st !== 'import'); };
   $$('input[name=tStyle], input[name=tMode]', root).forEach(r => r.onchange = upd); upd();
@@ -234,8 +266,7 @@ export async function testOnPage(page, nb) {
 }
 async function testTab(s, body) {
   if (activeTest && activeTest.setId === s.id) return drawQuiz(s, body);
-  let pages = [];
-  if (s.pageIds?.length > 1) { try { const nbs = await loadNotebooks(); const seen = new Set(); for (const nb of nbs) { const full = await api('/notebooks/' + nb.id); for (const p of full.pages) if (s.pageIds.includes(p.id) && !seen.has(p.id)) { seen.add(p.id); pages.push(p); } } } catch {} }
+  const pages = (s.pages || []).length > 1 ? s.pages : [];
   const cfg = testConfigHtml(s, { pages });
   body.innerHTML = `${s.tests.length ? `<div class="grid cols-2" style="margin-bottom:20px">${s.tests.slice().reverse().map(t => { const best = Math.max(0, ...t.attempts.map(a => a.percent)); const last = t.attempts[t.attempts.length - 1]; return `<div class="card"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><b>${esc(t.title)}</b> ${t.style === 'remake' ? '<span class="chip purple">new numbers</span>' : ''}${t.style === 'import' ? '<span class="chip blue">imported</span>' : ''}${t.fromPhotos ? `<span class="chip blue">📷 ${t.fromPhotos} photo${t.fromPhotos === 1 ? '' : 's'}</span>` : ''}${t.checked && !t.checked.error ? `<span class="chip green" title="AI re-solved every question${t.fromPhotos ? ' page by page against your photos' : ''} and fixed ${t.checked.fixed || 0} answer${t.checked.fixed === 1 ? '' : 's'}">✓ double-checked</span>` : ''}${t.difficulty ? `<span class="chip">${['very easy', 'easy', 'medium', 'hard', 'very hard'][t.difficulty - 1]}</span>` : ''}${t.description ? `<div class="small" style="margin:2px 0 4px;color:var(--ink-2)">${esc(t.description)}</div>` : ''}<div class="muted small">${t.questions.length} questions · ${ago(t.createdAt)}${t.attempts.length ? ` · ${t.attempts.length} attempt${t.attempts.length === 1 ? '' : 's'} · best <b style="color:var(--green)">${best}%</b>` : ' · not taken yet'}</div></div><button class="btn icon sm ghost delT" data-id="${t.id}">${icon('trash')}</button></div><div class="btn-row" style="margin-top:10px"><button class="btn primary sm takeT" data-id="${t.id}" data-mode="exam">${icon('quiz')} ${t.attempts.length ? 'Take again' : 'Take test'}</button><button class="btn sm takeT" data-id="${t.id}" data-mode="practice">🧪 Practice</button>${last ? `<button class="btn sm reviewT" data-id="${t.id}">Review last (${last.percent}%)</button>` : ''}${last && last.results && Object.values(last.results).some(r => !r.correct) ? `<button class="btn sm retryT" data-id="${t.id}">↺ Retry missed</button>` : ''}<button class="btn sm ghost printT" data-id="${t.id}">${icon('print')} Print</button></div></div>`; }).join('')}</div>` : ''}
     ${genBox({ emoji: '✅', title: s.tests.length ? 'Make another test' : 'Make a practice test', text: 'You\'re in charge: pick the type, difficulty, how many, and tell the AI exactly what you want. Take it as an exam or in practice mode with hints.', btn: 'Generate test', id: 'gen', extra: cfg })}`;
@@ -319,10 +350,11 @@ function cardsTab(s, body) {
   }
   if (!deck || deck.setId !== s.id) deck = { setId: s.id, order: s.cards.map((_, i) => i), i: 0, flipped: false, onlyUnknown: false, view: 'study' };
   const known = s.cards.filter(c => c.box >= 1).length;
+  const dueN = s.cards.filter(c => (c.due || 0) <= Date.now()).length;
   const cards = deck.onlyUnknown ? deck.order.filter(i => (s.cards[i].box || 0) < 1) : deck.order;
   if (deck.i >= cards.length) deck.i = 0;
   const cur = s.cards[cards[deck.i]];
-  body.innerHTML = `<div class="fc-meta"><div><b style="color:var(--ink)">${s.cards.length} cards</b> · ${known} known · ${s.cards.length - known} still learning</div><div class="btn-row"><div class="seg"><button class="${deck.view === 'study' ? 'active' : ''}" id="vStudy">Study</button><button class="${deck.view === 'list' ? 'active' : ''}" id="vList">All cards</button></div><button class="btn sm" id="more">${icon('plus')} More cards</button></div></div>
+  body.innerHTML = `<div class="fc-meta"><div><b style="color:var(--ink)">${s.cards.length} cards</b> · ${known} known · ${s.cards.length - known} still learning${dueN ? ` · <a href="#/review?set=${s.id}">${dueN} due for review</a>` : ''}</div><div class="btn-row"><div class="seg"><button class="${deck.view === 'study' ? 'active' : ''}" id="vStudy">Study</button><button class="${deck.view === 'list' ? 'active' : ''}" id="vList">All cards</button></div><button class="btn sm" id="more">${icon('plus')} More cards</button></div></div>
     ${deck.view === 'list' ? `<div class="fc-list">${s.cards.map((c, i) => `<div class="card"><span class="st chip ${c.box >= 1 ? 'green' : ''}">${c.box >= 1 ? 'known' : 'learning'}</span><b>${mdi(c.front)}</b><div class="muted">${mdi(c.back)}</div></div>`).join('')}</div>` :
       !cards.length ? `<div class="empty"><div class="big">🎉</div><h3>You know them all!</h3><p>Every card is marked known. Reset to drill again.</p><button class="btn" id="resetK">Reset progress</button></div>` :
       `<div class="fc-stage"><div class="fc ${deck.flipped ? 'flipped' : ''}" id="fc"><div class="face front"><span class="lab">Question · ${deck.i + 1} / ${cards.length}</span><div>${mdi(cur.front)}</div>${cur.hint ? `<span class="hint">Hint: ${esc(cur.hint)}</span>` : '<span class="hint">tap to flip · space</span>'}</div><div class="face back"><span class="lab">Answer</span><div>${mdi(cur.back)}</div></div></div>
@@ -338,11 +370,11 @@ function cardsTab(s, body) {
   const move = (d) => { deck.i = (deck.i + d + cards.length) % cards.length; deck.flipped = false; cardsTab(s, body); };
   $('#fc').onclick = flip; $('#prev').onclick = () => move(-1); $('#next').onclick = () => move(1);
   $('#sayCard').onclick = (e) => { e.stopPropagation(); voice.speak(deck.flipped ? cur.back : cur.front); };
-  $('#know').onclick = async () => { cur.box = 1; cur.seen = (cur.seen || 0) + 1; save(); move(1); };
-  $('#dunno').onclick = async () => { cur.box = 0; cur.seen = (cur.seen || 0) + 1; save(); move(1); };
+  $('#know').onclick = async () => { cur.box = Math.max(1, cur.box || 0); cur.due = Date.now() + 86400000; cur.seen = (cur.seen || 0) + 1; save(); move(1); };
+  $('#dunno').onclick = async () => { cur.box = 0; cur.due = 0; cur.seen = (cur.seen || 0) + 1; save(); move(1); };
   $('#shuffle').onclick = () => { deck.order.sort(() => Math.random() - 0.5); deck.i = 0; deck.flipped = false; cardsTab(s, body); };
   $('#onlyU').onclick = () => { deck.onlyUnknown = !deck.onlyUnknown; deck.i = 0; cardsTab(s, body); };
-  document.onkeydown = (e) => { if (e.target.closest('input,textarea')) return; if (e.code === 'Space') { e.preventDefault(); flip(); } if (e.key === 'ArrowRight') move(1); if (e.key === 'ArrowLeft') move(-1); if (e.key === '1') $('#dunno').click(); if (e.key === '2') $('#know').click(); };
+  setKeys((e) => { if (e.target.closest('input,textarea')) return; if (e.code === 'Space') { e.preventDefault(); flip(); } if (e.key === 'ArrowRight') move(1); if (e.key === 'ArrowLeft') move(-1); if (e.key === '1') $('#dunno')?.click(); if (e.key === '2') $('#know')?.click(); });
 }
 async function genCards(s, body, count) {
   const btn = $('#gen'); if (btn) busy(btn, true, 'Making cards…');
@@ -394,7 +426,7 @@ async function editSources(s) {
   $('#stNb', el).onchange = async () => {
     const id = $('#stNb', el).value; const box = $('#srcPages', el); if (!id) return;
     box.innerHTML = '<span class="spinner"></span>';
-    const nb = await api('/notebooks/' + id);
+    const nb = await api('/notebooks/' + id + '?lite=1');
     box.innerHTML = nb.pages.length ? nb.pages.map(p => `<label><input type="checkbox" value="${p.id}" ${chosen.has(p.id) ? 'checked' : ''}><span>p.${p.index} ${esc(p.title || '')}</span></label>`).join('') : '<span class="muted small">No scanned pages yet.</span>';
     $$('input', box).forEach(c => c.onchange = () => { c.checked ? chosen.add(c.value) : chosen.delete(c.value); $('#selCount', el).textContent = chosen.size + ' page(s) selected'; });
     $('#selAll', el).onclick = () => { $$('input', box).forEach(c => { c.checked = true; chosen.add(c.value); }); $('#selCount', el).textContent = chosen.size + ' page(s) selected'; };

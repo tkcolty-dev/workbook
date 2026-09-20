@@ -12,6 +12,7 @@
   "type": "commonjs",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
+    "compression": "^1.8.2",
     "express": "^5.2.1",
     "katex": "^0.18.4",
     "marked": "^18.0.10",

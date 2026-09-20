@@ -1,14 +1,14 @@
 // Slideshow view: one big page at a time — arrows, keys, swipe, filmstrip, autoplay, fullscreen,
 // and a toggle to show the AI digital copy next to (or instead of) the scan.
-import { api, $, $$, esc, h, md, mdPage, hydrateFigures, icon, toast, go, confirm, invalidate } from './core.js';
-import { shell } from './app.js';
+import { api, $, $$, esc, h, md, mdPage, hydrateFigures, icon, toast, go, confirm, invalidate, setKeys, loading, navId, stale, plural } from './core.js';
+import { shell, undoToast } from './app.js';
 import { testOnPage } from './study.js';
 
 let B = null; // { nb, pages, i, mode: 'scan'|'both'|'notes', playing, timer, dir }
 
 export async function bookView({ id }, q = {}) {
-  const main = shell('Notebooks', `<div class="thinking"><span class="spinner"></span> Opening slideshow…</div>`);
-  const nb = await api('/notebooks/' + id);
+  const main = shell('Notebooks', loading('Opening slideshow…'));
+  const seq = navId(); const nb = await api('/notebooks/' + id); if (stale(seq)) return;
   const pages = nb.pages;
   const start = q.p ? Math.max(1, Math.min(pages.length, +q.p)) - 1 : 0;
   B = { nb, pages, i: start, mode: localStorage.getItem('dwb_slidemode') || 'both', playing: false, timer: null };
@@ -26,7 +26,7 @@ export async function bookView({ id }, q = {}) {
   $('#play').onclick = togglePlay;
   $('#fs').onclick = () => { const el = $('#slides'); if (document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen?.(); };
   $$('#strip .bs').forEach(el => el.onclick = () => { B.i = +el.dataset.k; draw(); });
-  document.onkeydown = (e) => { if (e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight' || e.key === 'PageDown') step(1); if (e.key === 'ArrowLeft' || e.key === 'PageUp') step(-1); if (e.key === ' ') { e.preventDefault(); togglePlay(); } if (e.key === 'Home') { B.i = 0; draw(); } if (e.key === 'End') { B.i = pages.length - 1; draw(); } if (e.key === 'f') $('#fs').click(); };
+  setKeys((e) => { if (e.target.closest('input,textarea')) return; if (e.key === 'ArrowRight' || e.key === 'PageDown') step(1); if (e.key === 'ArrowLeft' || e.key === 'PageUp') step(-1); if (e.key === ' ') { e.preventDefault(); togglePlay(); } if (e.key === 'Home') { B.i = 0; draw(); } if (e.key === 'End') { B.i = pages.length - 1; draw(); } if (e.key === 'f') $('#fs').click(); });
   let sx = null; const st = $('#slides');
   st.addEventListener('pointerdown', e => { sx = e.clientX; });
   st.addEventListener('pointerup', e => { if (sx === null) return; const dx = e.clientX - sx; sx = null; if (Math.abs(dx) > 50) step(dx < 0 ? 1 : -1); });
@@ -43,7 +43,7 @@ function draw() {
   const slide = h(`<div class="slide mode-${B.mode} ${B.dir > 0 ? 'from-right' : B.dir < 0 ? 'from-left' : ''}">${B.mode === 'notes' ? notes : B.mode === 'scan' ? scan : scan + notes}</div>`);
   stage.innerHTML = ''; stage.appendChild(slide);
   const tb = $('#testThis', slide); if (tb) tb.onclick = () => { stopPlay(); testOnPage(p, B.nb); };
-  const db = $('#delSlide', slide); if (db) db.onclick = async () => { stopPlay(); if (await confirm('Delete this page?', `Page ${p.index}${p.title ? ' — ' + p.title : ''} will be removed.`)) { await api.del('/pages/' + p.id); invalidate(); B.pages = B.pages.filter(x => x !== p); B.pages.forEach((x, k) => { x.index = k + 1; }); if (!B.pages.length) return go('#/notebook/' + B.nb.id); B.i = Math.min(B.i, B.pages.length - 1); $('#strip').innerHTML = B.pages.map((q, k) => `<div class="bs" data-k="${k}" style="background-image:url('/api/pages/${q.id}/image?kind=thumb&r=${q.rev || 0}')"></div>`).join(''); $$('#strip .bs').forEach(el => el.onclick = () => { B.i = +el.dataset.k; draw(); }); draw(); toast('Page deleted', 'ok'); } };
+  const db = $('#delSlide', slide); if (db) db.onclick = async () => { stopPlay(); if (await confirm('Delete this page?', `Page ${p.index}${p.title ? ' — ' + p.title : ''} moves to the trash for 30 days.`)) { const r = await api.del('/pages/' + p.id); invalidate(); undoToast('Page deleted', r.trashId, () => go('#/book/' + B.nb.id)); B.pages = B.pages.filter(x => x !== p); B.pages.forEach((x, k) => { x.index = k + 1; }); if (!B.pages.length) return go('#/notebook/' + B.nb.id); B.i = Math.min(B.i, B.pages.length - 1); $('#strip').innerHTML = B.pages.map((q, k) => `<div class="bs" data-k="${k}" style="background-image:url('/api/pages/${q.id}/image?kind=thumb&r=${q.rev || 0}')"></div>`).join(''); $$('#strip .bs').forEach(el => el.onclick = () => { B.i = +el.dataset.k; draw(); }); draw(); toast('Page deleted', 'ok'); } };
   const sn = $('#slideNotes', slide); if (sn) { hydrateFigures(sn, p); const more = $('#notesMore', slide); const chk = () => { if (more) more.classList.toggle('show', sn.scrollHeight > sn.clientHeight + 8 && sn.scrollTop < sn.scrollHeight - sn.clientHeight - 8); }; sn.onscroll = chk; setTimeout(chk, 50); }
   $('#pos').innerHTML = `<b>${B.i + 1} / ${B.pages.length}</b>${p.title ? ` <span class="muted">· ${esc(p.title)}</span>` : ''}`;
   $('#dots').innerHTML = B.pages.length <= 20 ? B.pages.map((_, k) => `<i class="${k === B.i ? 'on' : ''}" data-k="${k}"></i>`).join('') : '';

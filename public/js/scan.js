@@ -1,7 +1,7 @@
 // Scanner v2: point → snap → done. Every capture goes through an automatic pipeline
 // (AI edge detection → straighten → enhance → upload → AI read) in the background while you keep shooting.
 // Cropping/filters are optional ("Adjust") — from the tray or later from the page.
-import { state, api, $, $$, esc, h, icon, toast, busy, modal, loadNotebooks, invalidate, go, ago } from './core.js';
+import { state, api, $, $$, esc, h, icon, toast, busy, modal, loadNotebooks, invalidate, go, ago, setKeys, loading, plural } from './core.js';
 import { shell, nbCover, notebookModal } from './app.js';
 import { fileToCanvas, bitmapToCanvas, scaleCanvas, toDataURL, rotateCanvas, rotateCorners, FULL_CORNERS, warp, enhance, thumbnail, blurScore, upscaleTo, sharpen } from './imageproc.js';
 
@@ -11,12 +11,81 @@ const FILTERS = [['enhanced', 'Enhanced ✦'], ['color', 'Soft color'], ['gray',
 const SHARPEN_AMOUNT = [0, 0.7, 1.4];
 
 function stopCamera() { if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; } }
-window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/scan')) stopCamera(); });
+window.addEventListener('hashchange', () => { if (!location.hash.startsWith('#/scan')) { stopCamera(); document.removeEventListener('paste', onPaste); } });
+
+// ---------- image pipeline in a Web Worker (the camera preview and the tray stay smooth while pages are processed) ----------
+let worker = null, wid = 0; const pending = new Map();
+const canWorker = () => typeof OffscreenCanvas !== 'undefined' && typeof Worker !== 'undefined' && 'convertToBlob' in OffscreenCanvas.prototype;
+function getWorker() {
+  if (worker) return worker;
+  worker = new Worker('/js/scanworker.js', { type: 'module' });
+  worker.onmessage = ({ data }) => { const p = pending.get(data.id); if (!p) return; pending.delete(data.id); data.error ? p.reject(new Error(data.error)) : p.resolve(data); };
+  worker.onerror = (e) => { console.warn('scan worker failed, falling back to main thread', e.message); for (const p of pending.values()) p.reject(new Error('worker crashed')); pending.clear(); worker.terminate(); worker = null; workerBroken = true; };
+  return worker;
+}
+let workerBroken = false;
+const canvasToBlob = (c, q = 0.9) => new Promise(res => c.toBlob(res, 'image/jpeg', q));
+// → { enhanced: Blob, original: Blob, thumb: Blob }
+async function buildOutputsAsync(it) {
+  if (canWorker() && !workerBroken) {
+    try {
+      const bitmap = await createImageBitmap(it.src);
+      const id = ++wid;
+      return await new Promise((resolve, reject) => { pending.set(id, { resolve, reject }); getWorker().postMessage({ id, bitmap, corners: it.corners, filter: it.filter, boost: it.boost }, [bitmap]); });
+    } catch (e) { console.warn('worker path failed:', e.message); }
+  }
+  await new Promise(r => setTimeout(r, 10));
+  const out = buildOutputs(it);
+  const [enhanced, original, thumb] = await Promise.all([canvasToBlob(out.enhanced, 0.9), canvasToBlob(out.original, 0.8), canvasToBlob(out.thumb, 0.8)]);
+  return { enhanced, original, thumb };
+}
+async function uploadPageImages(pageId, out, filter) {
+  await Promise.all([api.upload(`/pages/${pageId}/image/enh?filter=${encodeURIComponent(filter || 'enhanced')}`, out.enhanced), api.upload(`/pages/${pageId}/image/orig`, out.original), api.upload(`/pages/${pageId}/image/thumb`, out.thumb)]);
+}
+const setThumb = (it, blob) => { if (it.thumb && it.thumb.startsWith('blob:')) URL.revokeObjectURL(it.thumb); it.thumb = URL.createObjectURL(blob); };
+
+// ---------- paste / drag-drop / PDF import ----------
+function onPaste(e) {
+  if (!location.hash.startsWith('#/scan') || !S) return;
+  const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith('image/') || f.type === 'application/pdf');
+  if (!files.length) return;
+  e.preventDefault(); importFiles(files);
+}
+async function importFiles(files) {
+  for (const f of files) {
+    if (f.type === 'application/pdf' || /\.pdf$/i.test(f.name)) { await importPdf(f); continue; }
+    try { addCapture(await fileToCanvas(f, 2800)); } catch { toast('Could not read that image', 'err'); }
+  }
+}
+let pdfjs = null;
+async function loadPdfjs() {
+  if (pdfjs) return pdfjs;
+  const base = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/';
+  pdfjs = await import(base + 'pdf.min.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc = base + 'pdf.worker.min.mjs';
+  return pdfjs;
+}
+async function importPdf(file) {
+  const note = toast('Opening PDF…', '', { ms: 60000 });
+  try {
+    const lib = await loadPdfjs();
+    const doc = await lib.getDocument({ data: await file.arrayBuffer() }).promise;
+    const n = Math.min(doc.numPages, 60);
+    for (let i = 1; i <= n; i++) {
+      const page = await doc.getPage(i); const vp0 = page.getViewport({ scale: 1 }); const scale = Math.min(3, 2000 / Math.max(vp0.width, vp0.height)); const vp = page.getViewport({ scale });
+      const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      addCapture(c, { skipDetect: true, pdf: true });
+    }
+    note.close(); toast(`Added ${plural(n, 'page')} from the PDF`, 'ok');
+  } catch (e) { note.close(); toast('Could not open that PDF: ' + e.message, 'err'); }
+}
 
 let HW_MODE = false, PLAN_MODE = false;
 export async function scanView({ id }, q = {}) {
   HW_MODE = !!q.hw; PLAN_MODE = !!q.planner;
-  const main = shell(PLAN_MODE ? 'Planner' : 'Scan', `<div class="thinking"><span class="spinner"></span> Loading…</div>`);
+  const main = shell(PLAN_MODE ? 'Planner' : 'Scan', loading());
+  document.removeEventListener('paste', onPaste); document.addEventListener('paste', onPaste);
   if (PLAN_MODE) { if (!S || !S.planner) S = { planner: true, nbId: null, items: [], filter: 'enhanced', boost: 1 }; renderCapture(main); return; }
   if (S && S.planner) S = null;
   const nbs = await loadNotebooks(true);
@@ -38,23 +107,28 @@ async function renderCapture(main) {
   const nb = S.nb;
   main.innerHTML = `<div class="scan2">
     <div class="scan2-top">
-      ${PLAN_MODE ? `<div class="nb-pick"><span class="muted small">Planner scan</span><b style="font-size:16px">📅 Snap your planner, agenda or syllabus</b></div><div class="btn-row"><a class="btn sm" href="#/planner">${icon('calendar')} Back to planner</a></div>` : `<div class="nb-pick" id="nbPick"><span class="muted small">Scanning into</span><button class="btn" id="pickBtn">${nbCoverMini(nb)} <b>${esc(nb.name)}</b> <span class="muted">· ${nb.scanned || 0} pages</span> ▾</button></div>
+      ${PLAN_MODE ? `<div class="nb-pick"><span class="muted small">Planner scan</span><b style="font-size:16px">📅 Snap your planner, agenda or syllabus</b></div><div class="btn-row"><a class="btn sm" href="#/planner">${icon('calendar')} Back to planner</a></div>` : `<div class="nb-pick" id="nbPick"><span class="muted small">Scanning into</span><button class="btn" id="pickBtn" aria-haspopup="dialog">${nbCoverMini(nb)} <b>${esc(nb.name)}</b> <span class="muted">· ${plural(nb.scanned || 0, 'page')}</span> ▾</button></div>
       <div class="btn-row"><button class="btn sm ghost" id="settings" title="Scan settings">${icon('settings')} Look</button><a class="btn sm" href="#/notebook/${nb.id}">${icon('book')} Open notebook</a></div>`}
     </div>
     ${PLAN_MODE ? `<div class="ai-status" style="margin-bottom:10px">${icon('calendar')} Each photo is read for assignments, tests and due dates. When it's done, tap <b>Review & add</b> on it below.</div>` : ''}
-    ${HW_MODE ? `<div class="ai-status" style="margin-bottom:10px">${icon('check')} <b>Homework check mode</b> — snap your finished homework; after it's read, tap <b>Check</b> on it below and the AI grades every answer.</div>` : ''}
+    ${HW_MODE ? `<div class="ai-status" style="margin-bottom:10px">${icon('check')} <b>Homework check mode</b>: snap your finished homework; after it's read, tap <b>Check</b> on it below and the AI grades every answer.</div>` : ''}
     <div class="scan-stage" id="stage"><div class="noCam"><span class="spinner light"></span></div></div>
     <div class="shutter-bar" id="shutterBar"></div>
+    ${PLAN_MODE ? '' : `<div class="muted small" style="text-align:center;margin-top:-6px">Tip: paste a screenshot (⌘V), drop images here, or import a PDF.</div>`}
     <div class="tray" id="tray"></div>
   </div>`;
   drawTray();
   const pk = $('#pickBtn'); if (pk) pk.onclick = pickNotebook;
   const sg = $('#settings'); if (sg) sg.onclick = scanSettings;
   const stage = $('#stage'), bar = $('#shutterBar');
-  const fileBtn = (label, capture) => `<label class="btn filebtn ${capture ? 'primary lg' : ''}">${icon(capture ? 'camera' : 'upload')} ${label}<input type="file" accept="image/*" ${capture ? 'capture="environment"' : 'multiple'}></label>`;
+  const fileBtn = (label, capture) => `<label class="btn filebtn ${capture ? 'primary lg' : ''}">${icon(capture ? 'camera' : 'upload')} ${label}<input type="file" accept="image/*${capture ? '' : ',application/pdf'}" ${capture ? 'capture="environment"' : 'multiple'} aria-label="${label}"></label>`;
   const canLive = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) && window.isSecureContext;
-  bar.innerHTML = `${fileBtn('Take photo', true)}${fileBtn('Upload photos')}`;
+  bar.innerHTML = `${fileBtn('Take photo', true)}${fileBtn('Upload photos')}${PLAN_MODE ? '' : `<label class="btn filebtn">${icon('pdf')} Import PDF<input type="file" accept="application/pdf,.pdf" multiple aria-label="Import PDF"></label>`}`;
   wireFiles(bar);
+  // drag & drop onto the stage
+  stage.ondragover = (e) => { e.preventDefault(); stage.classList.add('drop'); };
+  stage.ondragleave = () => stage.classList.remove('drop');
+  stage.ondrop = (e) => { e.preventDefault(); stage.classList.remove('drop'); importFiles([...e.dataTransfer.files]); };
   if (canLive) {
     stage.innerHTML = `<div class="noCam"><span class="spinner light"></span><div class="small" style="margin-top:10px;opacity:.85">Starting camera… if your browser asks, click <b>Allow</b></div></div>`;
     try {
@@ -67,7 +141,7 @@ async function renderCapture(main) {
       $('#shot').onclick = () => { if (!video.videoWidth) return toast('Camera is still starting…'); flashStage(); addCapture(bitmapToCanvas(video, 2800)); };
       $('#flipCam').onclick = async () => { const cur = stream.getVideoTracks()[0].getSettings().facingMode; stopCamera(); try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: cur === 'user' ? { ideal: 'environment' } : 'user' }, audio: false }); video.srcObject = stream; video.play().catch(() => {}); } catch (e) { toast('Could not switch camera', 'err'); renderCapture(main); } };
       wireFiles(bar);
-      document.onkeydown = (e) => { if (e.code === 'Space' && !e.target.closest('input,textarea,button')) { e.preventDefault(); $('#shot')?.click(); } };
+      setKeys((e) => { if (e.code === 'Space' && !e.target.closest('input,textarea,button')) { e.preventDefault(); $('#shot')?.click(); } });
     } catch (e) {
       if (!$('#stage')) return;
       stage.innerHTML = `<div class="noCam"><div class="big">📷</div><b>Live camera didn’t start</b><div class="small" style="opacity:.85;margin-top:6px;max-width:420px">${cameraHelp(e)}</div><div class="btn-row" style="justify-content:center;margin-top:14px"><button class="btn" id="retryCam">${icon('refresh')} Retry camera</button></div><div class="small" style="opacity:.75;margin-top:10px">Or use “Take photo” below — it opens your camera app.</div></div>`;
@@ -81,7 +155,7 @@ function flashStage() { const st = $('#stage'); if (!st) return; const f = h('<d
 function wireFiles(bar) {
   $$('input[type=file]', bar).forEach(inp => inp.onchange = async () => {
     const files = [...inp.files]; if (!files.length) return;
-    for (const f of files) { try { addCapture(await fileToCanvas(f, 2800)); } catch (e) { toast('Could not read that image', 'err'); } }
+    await importFiles(files);
     inp.value = '';
   });
 }
@@ -126,8 +200,8 @@ function scanSettings() {
 
 // ---------- capture pipeline ----------
 let running = 0; const queue = [];
-function addCapture(src) {
-  const item = { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), src, thumb: toDataURL(scaleCanvas(src, 300), 0.7), status: 'queued', label: 'Waiting…', corners: FULL_CORNERS(), rotation: 0, filter: S.filter, boost: S.boost, pageId: null, title: '', suggestions: [], nbId: S.nbId, planner: PLAN_MODE };
+function addCapture(src, opts = {}) {
+  const item = { id: 'c' + Date.now() + Math.random().toString(36).slice(2, 6), src, thumb: toDataURL(scaleCanvas(src, 300), 0.7), status: 'queued', label: 'Waiting…', corners: FULL_CORNERS(), rotation: 0, filter: opts.pdf ? 'original' : S.filter, boost: opts.pdf ? 0 : S.boost, pageId: null, title: '', suggestions: [], nbId: S.nbId, planner: PLAN_MODE, skipDetect: !!opts.skipDetect, pdf: !!opts.pdf };
   S.items.unshift(item);
   drawTray();
   queue.push(item); pump();
@@ -148,26 +222,28 @@ async function processItem(it) {
     return;
   }
   try {
-    set('detect', 'Finding page edges…');
-    try {
-      const small = scaleCanvas(it.src, 900);
-      const r = await api('/ai/corners', { body: { image: toDataURL(small, 0.8) } });
-      if (r?.found && r.corners) {
-        const c = {}; for (const k of ['tl', 'tr', 'br', 'bl']) { const v = r.corners[k]; c[k] = { x: Math.min(1, Math.max(0, +v[0])), y: Math.min(1, Math.max(0, +v[1])) }; }
-        if (quadOk(c)) it.corners = c;
-        if (r.rotation && [90, 180, 270].includes(+r.rotation)) { it.src = rotateCanvas(it.src, +r.rotation); it.corners = rotateCorners(it.corners, +r.rotation); it.rotation = +r.rotation; }
-      }
-    } catch (e) { console.warn('corners failed', e.message); }
+    if (!it.skipDetect) {
+      set('detect', 'Finding page edges…');
+      try {
+        const small = scaleCanvas(it.src, 900);
+        const r = await api('/ai/corners', { body: { image: toDataURL(small, 0.8) } });
+        if (r?.found && r.corners) {
+          const c = {}; for (const k of ['tl', 'tr', 'br', 'bl']) { const v = r.corners[k]; c[k] = { x: Math.min(1, Math.max(0, +v[0])), y: Math.min(1, Math.max(0, +v[1])) }; }
+          if (quadOk(c)) it.corners = c;
+          if (r.rotation && [90, 180, 270].includes(+r.rotation)) { it.src = rotateCanvas(it.src, +r.rotation); it.corners = rotateCorners(it.corners, +r.rotation); it.rotation = +r.rotation; }
+        }
+      } catch (e) { console.warn('corners failed', e.message); }
+    }
     if (it.cancelled) return;
-    set('process', 'Straightening & cleaning…');
-    await new Promise(r => setTimeout(r, 10));
-    const out = buildOutputs(it);
-    it.thumb = out.thumb;
+    set('process', it.pdf ? 'Preparing page…' : 'Straightening & cleaning…');
+    const out = await buildOutputsAsync(it);
+    setThumb(it, out.thumb);
     if (it.cancelled) return;
     set('upload', 'Saving…');
-    const page = await api(`/notebooks/${it.nbId}/pages`, { body: { ...out, filter: it.filter } });
+    const page = await api(`/notebooks/${it.nbId}/pages`, { body: { filter: it.filter, source: it.pdf ? 'pdf' : undefined } });
     it.pageId = page.id; it.index = page.index; invalidate();
-    if (S.nb && S.nb.id === it.nbId) { S.nb.scanned = (S.nb.scanned || 0) + 1; const b = $('#pickBtn'); if (b) b.innerHTML = `${nbCoverMini(S.nb)} <b>${esc(S.nb.name)}</b> <span class="muted">· ${S.nb.scanned} pages</span> ▾`; }
+    await uploadPageImages(page.id, out, it.filter);
+    if (S.nb && S.nb.id === it.nbId) { S.nb.scanned = (S.nb.scanned || 0) + 1; const b = $('#pickBtn'); if (b) b.innerHTML = `${nbCoverMini(S.nb)} <b>${esc(S.nb.name)}</b> <span class="muted">· ${plural(S.nb.scanned, 'page')}</span> ▾`; }
     set('read', 'AI reading page…');
     const done = await api(`/pages/${page.id}/analyze`, { body: {} });
     it.title = done.title; it.suggestions = done.suggestions || [];
@@ -188,18 +264,18 @@ function buildOutputs(it) {
   if (boostLevel) warped = upscaleTo(warped, boostLevel === 2 ? 2000 : 1600, 2400);
   let enhanced = enhance(warped, it.filter);
   if (boostLevel) enhanced = sharpen(enhanced, SHARPEN_AMOUNT[boostLevel]);
-  return { enhanced: toDataURL(enhanced, 0.9), original: toDataURL(scaleCanvas(it.src, 1600), 0.8), thumb: toDataURL(thumbnail(enhanced, 420), 0.8) };
+  return { enhanced, original: scaleCanvas(it.src, 1600), thumb: thumbnail(enhanced, 420) }; // canvases (main-thread fallback)
 }
 
 // ---------- tray ----------
 function drawTray() {
   const tray = $('#tray'); if (!tray) return;
-  if (!S.items.length) { tray.innerHTML = `<div class="tray-empty muted small">📸 Snap a page — it's cropped, cleaned and read automatically. Keep snapping; adjust anything later.</div>`; return; }
+  if (!S.items.length) { tray.innerHTML = `<div class="tray-empty muted small">📸 Snap a page. It's cropped, cleaned and read automatically. Keep snapping; adjust anything later.</div>`; return; }
   const busyN = S.items.filter(i => !['ready', 'error'].includes(i.status)).length;
-  tray.innerHTML = `<div class="tray-head"><b>${S.items.length} scanned this session</b>${busyN ? `<span class="muted small"><span class="spinner" style="width:12px;height:12px"></span> ${busyN} processing</span>` : '<span class="chip green">all done ✓</span>'}${S.planner ? `<a class="btn sm ghost" href="#/planner">${icon('calendar')} Open planner ${icon('chevR')}</a>` : `<a class="btn sm ghost" href="#/notebook/${S.nbId}">See all pages ${icon('chevR')}</a>`}</div>
+  tray.innerHTML = `<div class="tray-head"><b>${S.items.length} scanned this session</b>${busyN ? `<span class="muted small" role="status"><span class="spinner" style="width:12px;height:12px"></span> ${busyN} processing</span>` : '<span class="chip green">all done ✓</span>'}${S.planner ? `<a class="btn sm ghost" href="#/planner">${icon('calendar')} Open planner ${icon('chevR')}</a>` : `<a class="btn sm ghost" href="#/notebook/${S.nbId}">See all pages ${icon('chevR')}</a>`}</div>
     <div class="tray-items">${S.items.map(it => `<div class="tray-item ${it.status}" data-id="${it.id}"><div class="ti-img" style="background-image:url('${it.thumb}')">${it.status !== 'ready' && it.status !== 'error' ? '<div class="ti-spin"><span class="spinner light"></span></div>' : ''}${it.status === 'ready' ? '<div class="ti-ok">✓</div>' : it.status === 'error' ? '<div class="ti-ok err">!</div>' : ''}</div>
       <div class="ti-cap"><b>${it.index ? 'p.' + it.index + ' ' : ''}${esc(it.title || '')}</b><span class="muted">${esc(it.label)}</span></div>
-      <div class="ti-actions">${it.planner ? (it.planItems?.length ? `<button class="btn sm ${it.added ? '' : 'primary'} planRev">${it.added ? '✓ Added · review again' : '📅 Review & add'}</button>` : '') : `<button class="btn sm ghost adj" title="Adjust crop / look">${icon('edit')}</button>`}${it.pageId ? `<a class="btn sm ghost" href="#/page/${it.pageId}" title="Open page">${icon('eye')}</a>` : ''}${it.pageId && it.status === 'ready' ? `<button class="btn sm ${HW_MODE ? 'primary' : 'ghost'} hwk" title="Check as homework">${icon('check')}</button>` : ''}${it.status === 'error' ? `<button class="btn sm retry">${icon('refresh')}</button>` : `<button class="btn sm ghost del" title="Delete">${icon('trash')}</button>`}</div>
+      <div class="ti-actions">${it.planner ? (it.planItems?.length ? `<button class="btn sm ${it.added ? '' : 'primary'} planRev">${it.added ? '✓ Added · review again' : '📅 Review & add'}</button>` : '') : `<button class="btn sm ghost adj" title="Adjust crop / look" aria-label="Adjust crop and look">${icon('edit')}</button>`}${it.pageId ? `<a class="btn sm ghost" href="#/page/${it.pageId}" title="Open page" aria-label="Open page">${icon('eye')}</a>` : ''}${it.pageId && it.status === 'ready' ? `<button class="btn sm ${HW_MODE ? 'primary' : 'ghost'} hwk" title="Check as homework" aria-label="Check as homework">${icon('check')}</button>` : ''}${it.status === 'error' ? `<button class="btn sm retry" aria-label="Retry">${icon('refresh')}</button>` : `<button class="btn sm ghost del" title="Delete" aria-label="Delete">${icon('trash')}</button>`}</div>
       ${it.suggestions?.some(s => !s.done) ? `<div class="ti-sug">${it.suggestions.map((sg, k) => sg.done ? '' : `<button class="chip amber sug" data-k="${k}">📅 ${esc(sg.title)}${sg.date ? ' · ' + esc(sg.date) : ''} → planner</button>`).join('')}</div>` : ''}
     </div>`).join('')}</div>`;
   $$('.tray-item', tray).forEach(el => {
@@ -260,11 +336,11 @@ export async function openAdjust(it, onSaved) {
     busy($('#apply', el), true, 'Applying…');
     await new Promise(r => setTimeout(r, 20));
     try {
-      const out = buildOutputs({ src: A.src, corners: A.corners, filter: A.filter, boost: A.boost });
-      it.src = A.src; it.corners = A.corners; it.filter = A.filter; it.boost = A.boost; it.thumb = out.thumb;
+      const out = await buildOutputsAsync({ src: A.src, corners: A.corners, filter: A.filter, boost: A.boost });
+      it.src = A.src; it.corners = A.corners; it.filter = A.filter; it.boost = A.boost; setThumb(it, out.thumb);
       if (it.pageId) {
-        await api.patch('/pages/' + it.pageId, { enhanced: out.enhanced, thumb: out.thumb, filter: A.filter });
-        m.close(); toast('Page updated — re-reading with AI…', 'ok'); drawTray();
+        await Promise.all([api.upload(`/pages/${it.pageId}/image/enh?filter=${encodeURIComponent(A.filter)}`, out.enhanced), api.upload(`/pages/${it.pageId}/image/thumb`, out.thumb)]);
+        m.close(); toast('Page updated. Re-reading with AI…', 'ok'); drawTray();
         api('/pages/' + it.pageId + '/analyze', { body: {} }).then(done => { it.title = done.title; drawTray(); onSaved && onSaved(done); }).catch(() => {});
       } else { m.close(); drawTray(); }
     } catch (e) { toast(e.message, 'err'); busy($('#apply', el), false); }
