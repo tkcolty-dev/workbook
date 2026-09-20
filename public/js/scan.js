@@ -96,7 +96,8 @@ export async function scanView({ id }, q = {}) {
     const created = await api('/notebooks', { body: { name: 'My Notebook', subject: '', color: 'navy', pageCount: 0 } });
     invalidate(); return go('#/scan/' + created.id);
   }
-  if (!S || S.nbId !== nbId) S = { nbId, items: [], filter: localStorage.getItem('dwb_filter') || 'enhanced', boost: +(localStorage.getItem('dwb_boost') ?? 1) };
+  const us = state.user?.settings || {};
+  if (!S || S.nbId !== nbId) S = { nbId, items: [], filter: localStorage.getItem('dwb_filter') || us.scanFilter || 'enhanced', boost: +(localStorage.getItem('dwb_boost') ?? us.scanBoost ?? 1) };
   S.nb = nbs.find(n => n.id === nbId); S.nbs = nbs;
   localStorage.setItem('dwb_last_nb', nbId);
   renderCapture(main);
@@ -222,7 +223,7 @@ async function processItem(it) {
     return;
   }
   try {
-    if (!it.skipDetect) {
+    if (!it.skipDetect && state.user?.settings?.cornerDetect !== false) {
       set('detect', 'Finding page edges…');
       try {
         const small = scaleCanvas(it.src, 900);
@@ -244,9 +245,11 @@ async function processItem(it) {
     it.pageId = page.id; it.index = page.index; invalidate();
     await uploadPageImages(page.id, out, it.filter);
     if (S.nb && S.nb.id === it.nbId) { S.nb.scanned = (S.nb.scanned || 0) + 1; const b = $('#pickBtn'); if (b) b.innerHTML = `${nbCoverMini(S.nb)} <b>${esc(S.nb.name)}</b> <span class="muted">· ${plural(S.nb.scanned, 'page')}</span> ▾`; }
+    if (state.user?.settings?.autoRead === false) { set('ready', 'Saved (not read yet)'); return; }
     set('read', 'AI reading page…');
     const done = await api(`/pages/${page.id}/analyze`, { body: {} });
-    it.title = done.title; it.suggestions = done.suggestions || [];
+    it.title = done.title; it.suggestions = done.suggestions || []; it.sort = done.sort || null;
+    if (it.sort?.status === 'done' && it.sort.auto) { it.nbId = null; toast(`📥 Page ${it.index} looked like ${done.subject || 'another subject'}, moved to ${it.sort.to}`); }
     set('ready', done.title || 'Ready');
     if (it.suggestions.length) toast(`📅 Page ${it.index}: found "${it.suggestions[0].title}" — tap it below to add to your planner`);
   } catch (e) {
@@ -277,6 +280,7 @@ function drawTray() {
       <div class="ti-cap"><b>${it.index ? 'p.' + it.index + ' ' : ''}${esc(it.title || '')}</b><span class="muted">${esc(it.label)}</span></div>
       <div class="ti-actions">${it.planner ? (it.planItems?.length ? `<button class="btn sm ${it.added ? '' : 'primary'} planRev">${it.added ? '✓ Added · review again' : '📅 Review & add'}</button>` : '') : `<button class="btn sm ghost adj" title="Adjust crop / look" aria-label="Adjust crop and look">${icon('edit')}</button>`}${it.pageId ? `<a class="btn sm ghost" href="#/page/${it.pageId}" title="Open page" aria-label="Open page">${icon('eye')}</a>` : ''}${it.pageId && it.status === 'ready' ? `<button class="btn sm ${HW_MODE ? 'primary' : 'ghost'} hwk" title="Check as homework" aria-label="Check as homework">${icon('check')}</button>` : ''}${it.status === 'error' ? `<button class="btn sm retry" aria-label="Retry">${icon('refresh')}</button>` : `<button class="btn sm ghost del" title="Delete" aria-label="Delete">${icon('trash')}</button>`}</div>
       ${it.suggestions?.some(s => !s.done) ? `<div class="ti-sug">${it.suggestions.map((sg, k) => sg.done ? '' : `<button class="chip amber sug" data-k="${k}">📅 ${esc(sg.title)}${sg.date ? ' · ' + esc(sg.date) : ''} → planner</button>`).join('')}</div>` : ''}
+      ${it.sort?.status === 'pending' ? `<div class="ti-sug"><button class="chip purple sortGo">📥 ${it.sort.notebookId ? 'Move to ' + esc(it.sort.name) : 'New notebook “' + esc(it.sort.create) + '”'}</button></div>` : ''}
     </div>`).join('')}</div>`;
   $$('.tray-item', tray).forEach(el => {
     const it = S.items.find(i => i.id === el.dataset.id);
@@ -286,6 +290,7 @@ function drawTray() {
     const rt = $('.retry', el); if (rt) rt.onclick = () => { it.status = 'queued'; queue.push(it); pump(); drawTray(); };
     $$('.sug', el).forEach(b => b.onclick = () => addSuggestion(it, it.suggestions[+b.dataset.k]));
     const hk = $('.hwk', el); if (hk) hk.onclick = async () => { const { checkHomework } = await import('./app.js'); checkHomework({ id: it.pageId }, S.nb); };
+    const sg2 = $('.sortGo', el); if (sg2) sg2.onclick = async () => { try { const r = await api('/pages/' + it.pageId + '/sort', { body: it.sort.notebookId ? { notebookId: it.sort.notebookId } : { createName: it.sort.create } }); it.sort = { status: 'done', to: r.notebook.name }; invalidate(); if (S.nb) S.nb.scanned = Math.max(0, (S.nb.scanned || 1) - 1); toast('Moved to ' + r.notebook.name, 'ok'); drawTray(); } catch (e) { toast(e.message, 'err'); } };
   });
 }
 async function addSuggestion(it, sg) {

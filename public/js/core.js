@@ -31,14 +31,41 @@ export function download(name, text, type = 'text/plain') {
 }
 export async function copyText(t) { try { await navigator.clipboard.writeText(t); return true; } catch { const ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove(); return ok; } }
 
-// ---------- theme ----------
+// ---------- theme + user settings (saved to the account, applied on every device) ----------
+// theme: 'auto' (follows the device) | 'light' | 'dark' | 'schedule' (dark 7pm–7am)
 export const getTheme = () => { try { return localStorage.getItem('dwb_theme') || 'auto'; } catch { return 'auto'; } };
-export function setTheme(t) {
+export function applyTheme() {
+  const t = getTheme(); const r = document.documentElement;
+  let mode = t; if (t === 'schedule') { const hh = new Date().getHours(); mode = (hh >= 19 || hh < 7) ? 'dark' : 'light'; }
+  if (mode === 'light' || mode === 'dark') r.dataset.theme = mode; else delete r.dataset.theme;
+  const meta = document.querySelector('meta[name=theme-color]:not([media])') || (() => { const m = document.createElement('meta'); m.name = 'theme-color'; document.head.appendChild(m); return m; })();
+  meta.content = isDark() ? '#0f131b' : '#f4f6fa';
+}
+let themeSaveT = null;
+export function setTheme(t, { save = true } = {}) {
   try { localStorage.setItem('dwb_theme', t); } catch {}
-  const r = document.documentElement; if (t === 'light' || t === 'dark') r.dataset.theme = t; else delete r.dataset.theme;
+  applyTheme();
   document.dispatchEvent(new CustomEvent('themechange', { detail: t }));
+  if (save && state.user) { clearTimeout(themeSaveT); themeSaveT = setTimeout(() => api.patch('/me', { settings: { theme: t } }).then(r => { state.user = r.user; }).catch(() => {}), 300); }
 }
 export const isDark = () => document.documentElement.dataset.theme === 'dark' || (!document.documentElement.dataset.theme && document.documentElement.classList.contains('sys-dark'));
+setInterval(applyTheme, 60 * 1000); // keeps 'schedule' honest as the evening comes
+try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTimeout(applyTheme, 0)); } catch {}
+
+export const ACCENTS = { blue: '#1f4fd8', purple: '#7b4fe0', green: '#1a9a5c', teal: '#12968f', pink: '#e0499a', red: '#de4b39', orange: '#e0711b', ink: '#151a2d' };
+export const settings = () => state.user?.settings || {};
+// apply account settings to the page: theme (account wins over this device), accent, text size, motion, density
+export function applySettings() {
+  const s = settings(); const r = document.documentElement;
+  if (s.theme && s.theme !== getTheme()) { try { localStorage.setItem('dwb_theme', s.theme); } catch {} }
+  applyTheme();
+  if (s.fontSize && s.fontSize !== 'normal') r.dataset.size = s.fontSize; else delete r.dataset.size;
+  r.classList.toggle('reduce-motion', !!s.reduceMotion);
+  r.classList.toggle('compact', !!s.compact);
+  if (s.accent && ACCENTS[s.accent] && s.accent !== 'blue') { r.style.setProperty('--accent', ACCENTS[s.accent]); r.style.setProperty('--accent-soft', 'color-mix(in srgb, ' + ACCENTS[s.accent] + ' 16%, var(--card))'); }
+  else { r.style.removeProperty('--accent'); r.style.removeProperty('--accent-soft'); }
+}
+export async function saveSettings(patch) { const r = await api.patch('/me', { settings: patch }); state.user = r.user; applySettings(); return r.user; }
 
 // ---------- keyboard: one global listener; each view registers its own handler ----------
 let viewKeys = null, pendingG = 0;
@@ -197,6 +224,13 @@ const I = {
   play: '<path d="M7 5v14l11-7z"/>',
   fire: '<path d="M12 22c4 0 7-3 7-7 0-3-2-5-3-7-1 2-2 3-3 3 0-3-1-6-4-8 0 4-4 6-4 12 0 4 3 7 7 7z"/>',
   lock: '<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>',
+  inbox: '<path d="M3 13h5l2 3h4l2-3h5"/><path d="M5 5h14l2 8v6H3v-6z"/>',
+  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><circle cx="17" cy="9" r="2.5"/><path d="M16 15.5a5 5 0 0 1 5.5 4.5"/>',
+  week: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4M7 14h3M14 14h3M7 18h3"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  palette: '<circle cx="12" cy="12" r="9"/><circle cx="8" cy="10" r="1.2"/><circle cx="12" cy="7.5" r="1.2"/><circle cx="16" cy="10" r="1.2"/><path d="M12 21a3 3 0 0 0 0-6h-1.5a1.5 1.5 0 0 1 0-3"/>',
+  type: '<path d="M5 6V4h14v2M12 4v16M9 20h6"/>',
+  shield: '<path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/>',
   clip: '<path d="m21 11-8.5 8.5a5 5 0 0 1-7-7L14 4a3.5 3.5 0 0 1 5 5l-8.5 8.5a2 2 0 0 1-3-3L15 7"/>',
 };
 // Brand mark: app-icon tile with a clean white notebook page and a small gold spark.

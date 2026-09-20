@@ -63,7 +63,7 @@ export async function sharedView({ token }) {
       const dc = () => { if (!cards.length) return body.innerHTML = '<div class="empty">No flashcards in this set.</div>'; const c = cards[i]; body.innerHTML = `<div class="fc-stage"><div class="fc ${flipped ? 'flipped' : ''}" id="fc"><div class="face front"><span class="lab">Question · ${i + 1} / ${cards.length}</span><div>${mdi(c.front)}</div><span class="hint">tap to flip</span></div><div class="face back"><span class="lab">Answer</span><div>${mdi(c.back)}</div></div></div><div class="fc-controls"><button class="btn" id="pv">${icon('chevL')} Prev</button><button class="btn" id="nx">Next ${icon('chevR')}</button></div></div>`; $('#fc').onclick = () => { flipped = !flipped; $('#fc').classList.toggle('flipped', flipped); }; $('#pv').onclick = () => { i = (i - 1 + cards.length) % cards.length; flipped = false; dc(); }; $('#nx').onclick = () => { i = (i + 1) % cards.length; flipped = false; dc(); }; };
       dc();
     } else {
-      body.innerHTML = s.tests.length ? `<div class="grid cols-2">${s.tests.map(t => `<div class="card"><b>${esc(t.title)}</b><div class="muted small">${t.questions.length} questions${t.description ? ' · ' + esc(t.description) : ''}</div><button class="btn primary sm take" data-id="${t.id}" style="margin-top:8px">Take it</button></div>`).join('')}</div>` : '<div class="empty">No practice tests in this set.</div>';
+      body.innerHTML = s.tests.length ? `<div class="grid cols-2">${s.tests.map(t => `<div class="card"><b>${esc(t.title)}</b><div class="muted small">${t.questions.length} questions${t.description ? ' · ' + esc(t.description) : ''}</div>${scoreboardHtml(t, data.by)}<button class="btn primary sm take" data-id="${t.id}" style="margin-top:8px">${t.friends?.length ? 'Beat the top score' : 'Take it'}</button></div>`).join('')}</div>` : '<div class="empty">No practice tests in this set.</div>';
       $$('.take').forEach(b => b.onclick = () => takeShared(s.tests.find(t => t.id === b.dataset.id)));
     }
   };
@@ -71,9 +71,25 @@ export async function sharedView({ token }) {
     const answers = {}; const L = 'ABCD'; const body = $('#body');
     body.innerHTML = `<h2>${esc(test.title)}</h2><div id="qs">${test.questions.map((q, i) => `<div class="q" data-id="${q.id}"><div class="qn">Question ${i + 1}</div><div class="qt">${mdi(q.question)}</div>${q.type === 'mc' ? `<div class="choices">${q.choices.map((c, ci) => `<div class="choice" data-ci="${ci}"><span class="letter">${L[ci]}</span><span>${mdi(c)}</span></div>`).join('')}</div>` : q.type === 'tf' ? `<div class="choices">${[true, false].map(v => `<div class="choice" data-v="${v}"><span class="letter">${v ? 'T' : 'F'}</span><span>${v ? 'True' : 'False'}</span></div>`).join('')}</div>` : `<textarea placeholder="Your answer…"></textarea>`}</div>`).join('')}</div><div style="text-align:center"><button class="btn primary lg" id="sub">Submit</button></div>`;
     $$('.q').forEach(qel => { const id = qel.dataset.id; $$('.choice', qel).forEach(c => c.onclick = () => { $$('.choice', qel).forEach(x => x.classList.remove('sel')); c.classList.add('sel'); answers[id] = c.dataset.ci !== undefined ? +c.dataset.ci : c.dataset.v === 'true'; }); const ta = $('textarea', qel); if (ta) ta.oninput = () => { answers[id] = ta.value; }; });
-    $('#sub').onclick = async () => { busy($('#sub'), true, 'Grading…'); try { const a = await api(`/shared/${token}/grade/${test.id}`, { body: { answers } }); body.innerHTML = `<div class="card score-card"><div class="score-ring" style="--p:${a.percent}"><div>${a.percent}%</div></div><div class="muted small">${Math.round(a.score * 10) / 10} / ${a.total}</div><div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn" id="back">Back</button></div></div>${test.questions.map((q, i) => { const r = a.results[q.id]; return `<div class="q"><div class="qn">Question ${i + 1}</div><div class="qt">${mdi(q.question)}</div><div class="fb ${r?.correct ? 'ok' : 'bad'}">${r?.correct ? '✅ Correct' : '❌ Not quite'}${r?.feedback ? ' — ' + mdi(r.feedback) : ''}</div></div>`; }).join('')}`; $('#back').onclick = draw; } catch (e) { toast(e.message, 'err'); busy($('#sub'), false); } };
+    $('#sub').onclick = async () => { const name = state.user ? (state.user.name || state.user.username) : await askFriendName(); if (name === null) return; busy($('#sub'), true, 'Grading…'); try { const a = await api(`/shared/${token}/grade/${test.id}`, { body: { answers, name } }); test.friends = a.friends || test.friends; test.ownerBest = a.ownerBest ?? test.ownerBest; const beat = a.ownerBest != null && a.percent > a.ownerBest; body.innerHTML = `<div class="card score-card"><div class="score-ring" style="--p:${a.percent}"><div>${a.percent}%</div></div><div class="display" style="font-size:20px;font-weight:650">${beat ? `You beat ${esc(data.by || 'the owner')}'s best (${a.ownerBest}%) 🏆` : a.ownerBest != null ? `${esc(data.by || 'The owner')}'s best is ${a.ownerBest}%` : 'Nice work'}</div><div class="muted small">${Math.round(a.score * 10) / 10} / ${a.total} · saved to the scoreboard as ${esc(name)}</div>${scoreboardHtml(test, data.by)}<div class="btn-row" style="justify-content:center;margin-top:12px"><button class="btn" id="back">Back</button>${state.user ? '' : '<a class="btn primary" href="#/register">Make your own WorkBook</a>'}</div></div>${test.questions.map((q, i) => { const r = a.results[q.id]; return `<div class="q"><div class="qn">Question ${i + 1}</div><div class="qt">${mdi(q.question)}</div><div class="fb ${r?.correct ? 'ok' : 'bad'}">${r?.correct ? '✅ Correct' : '❌ Not quite'}${r?.feedback ? ' — ' + mdi(r.feedback) : ''}</div></div>`; }).join('')}`; $('#back').onclick = draw; } catch (e) { toast(e.message, 'err'); busy($('#sub'), false); } };
   };
   draw();
+}
+// scoreboard under a shared test: owner's best + friends' scores
+function scoreboardHtml(t, owner) {
+  const rows = [...(t.friends || []).map(f => ({ name: f.name, percent: f.percent, at: f.at }))];
+  if (t.ownerBest != null) rows.push({ name: (owner || 'Owner') + ' (owner)', percent: t.ownerBest, owner: true });
+  if (!rows.length) return '';
+  rows.sort((a, b) => b.percent - a.percent);
+  return `<div class="scoreboard compact"><div class="sb-rows">${rows.slice(0, 6).map((r, i) => `<div class="sb-row ${r.owner ? 'owner' : ''}"><span class="rank">${['🥇', '🥈', '🥉'][i] || (i + 1)}</span><span class="nm">${esc(r.name)}</span>${r.at ? `<span class="muted small">${ago(r.at)}</span>` : '<span></span>'}<b>${r.percent}%</b></div>`).join('')}</div></div>`;
+}
+function askFriendName() {
+  return new Promise(resolve => {
+    let last = ''; try { last = localStorage.getItem('dwb_friend_name') || ''; } catch {}
+    const m = modal(`<h2>Who's taking it?</h2><p class="muted small" style="margin:-6px 0 12px">Your name goes on the scoreboard so ${esc(state.user ? 'they' : 'your friend')} can see who to beat.</p><div class="field"><label for="fName">Your name</label><input type="text" id="fName" value="${esc(last)}" placeholder="e.g. Alex" maxlength="40"></div><div class="actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="fGo">Submit test</button></div>`, { onClose: () => resolve(null) });
+    const go_ = () => { const v = $('#fName', m.el).value.trim() || 'A friend'; try { localStorage.setItem('dwb_friend_name', v); } catch {} m.el.remove(); resolve(v); };
+    $('#fGo', m.el).onclick = go_; $('#fName', m.el).onkeydown = (e) => { if (e.key === 'Enter') go_(); };
+  });
 }
 async function hydrateFiguresFrom(root, page, url) {
   const slots = $$('.pg-fig', root); if (!slots.length) return;
@@ -129,7 +145,7 @@ export const voice = {
     if (!('speechSynthesis' in window)) return onDone && onDone();
     const clean = String(text).replace(/\$[^$]*\$/g, m => m.replace(/[$\\{}]/g, ' ').replace(/frac/g, ' over ').replace(/times/g, ' times ').replace(/sqrt/g, ' square root of ')).replace(/[*_#`>]/g, '').replace(/\[\[figure:\d+\]\]/g, '');
     speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(clean); u.rate = 1.02; u.lang = 'en-US';
+    const u = new SpeechSynthesisUtterance(clean); u.rate = state.user?.settings?.speakRate || 1.02; u.lang = 'en-US';
     const v = speechSynthesis.getVoices().find(v => /en[-_]US/.test(v.lang) && /Samantha|Google US|Aria|Jenny|Natural/.test(v.name)) || speechSynthesis.getVoices().find(v => /en[-_]US/.test(v.lang)); if (v) u.voice = v;
     u.onend = () => onDone && onDone(); speechSynthesis.speak(u);
   },

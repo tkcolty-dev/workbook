@@ -1,0 +1,30 @@
+// Week: seven days side by side with everything due and planned, a load meter per day, and a one-tap rebalance.
+import { state, api, $, $$, esc, h, icon, toast, modal, confirm, busy, go, fmtDate, todayISO, parseISO, DOW, MON, TYPES, loading, navId, stale, plural, fmtMin, loadEvents } from './core.js';
+import { shell, eventModal } from './app.js';
+
+const addDays = (iso, n) => { const d = parseISO(iso); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const weekStartOf = (iso, startsMonday) => { const d = parseISO(iso); const dow = d.getDay(); const back = startsMonday ? (dow + 6) % 7 : dow; return addDays(iso, -back); };
+export async function weekView(_, q = {}) {
+  const main = shell('Week', loading());
+  const seq = navId();
+  const today = todayISO(); const startsMonday = state.user.settings?.weekStart === 'mon';
+  const start = q.start || weekStartOf(today, startsMonday);
+  const W = await api('/week?start=' + start); if (stale(seq)) return;
+  const draw = (W) => {
+    const maxMin = Math.max(90, ...W.days.map(d => d.minutes));
+    main.innerHTML = `<div class="page-head"><div><h1>Week</h1><div class="sub">Everything due and every planned task, day by day. Heavy days get flagged; one tap spreads the plan out.</div></div><div class="btn-row"><a class="btn icon" href="#/week?start=${addDays(start, -7)}" aria-label="Previous week">${icon('chevL')}</a><a class="btn" href="#/week">This week</a><a class="btn icon" href="#/week?start=${addDays(start, 7)}" aria-label="Next week">${icon('chevR')}</a>${W.heavy ? `<button class="btn mark" id="rebalance">${icon('wand')} Rebalance ${plural(W.heavy, 'heavy day')}</button>` : ''}</div></div>
+      <div class="today" style="margin-bottom:16px"><div class="t"><span class="lbl">Total this week</span><b>${fmtMin(W.total)}</b><span>${fmtMin(Math.round(W.total / 7))} a day on average</span></div><div class="t ${W.heavy ? 'hot' : ''}"><span class="lbl">Heavy days</span><b>${W.heavy}</b><span>${W.heavy ? 'over 75 minutes' : 'nothing over 75 min'}</span></div><div class="t"><span class="lbl">Tests and quizzes</span><b>${W.days.reduce((n, d) => n + d.events.filter(e => (e.type === 'test' || e.type === 'quiz') && !e.done).length, 0)}</b><span>this week</span></div><div class="t"><span class="lbl">Plan tasks</span><b>${W.days.reduce((n, d) => n + d.tasks.filter(t => !t.done).length, 0)}</b><span>left to do</span></div></div>
+      <div class="week-grid">${W.days.map(d => { const dt = parseISO(d.date); const past = d.date < today; return `<div class="wday ${d.date === today ? 'today' : ''} ${past ? 'past' : ''} load-${d.load}" data-date="${d.date}">
+        <div class="wd-head"><div><span class="wd-name">${DOW[dt.getDay()]}</span><b>${dt.getDate()}</b> <span class="muted small">${MON[dt.getMonth()]}</span></div><span class="wd-load ${d.load}" title="${fmtMin(d.minutes)} planned">${d.minutes ? fmtMin(d.minutes) : 'free'}</span></div>
+        <div class="wd-meter"><i style="width:${Math.round(100 * d.minutes / maxMin)}%"></i></div>
+        <div class="wd-body">${d.events.map(e => `<button type="button" class="wd-ev ${e.done ? 'done' : ''}" data-ev="${e.id}"><span class="type-dot t-${esc(e.type)}"></span><span class="txt">${esc(e.title)}</span>${e.time ? `<small>${esc(e.time)}</small>` : ''}</button>`).join('')}${d.tasks.map(t => `<label class="wd-task ${t.done ? 'done' : ''}"><input type="checkbox" data-set="${t.setId}" data-task="${t.id}" ${t.done ? 'checked' : ''}><span class="txt">${esc(t.text)}<small>${esc(t.set)} · ${fmtMin(t.minutes)}</small></span><button type="button" class="mv" data-set="${t.setId}" data-task="${t.id}" aria-label="Move to another day" title="Move">${icon('chevR')}</button></label>`).join('')}${!d.events.length && !d.tasks.length ? `<div class="muted small wd-empty">${past ? '' : 'Nothing yet'}</div>` : ''}</div>
+        ${!past ? `<button type="button" class="wd-add" data-date="${d.date}">${icon('plus')} Add</button>` : ''}</div>`; }).join('')}</div>
+      <div class="muted small" style="margin-top:10px">Load = estimated minutes: plan tasks plus about 45 min per test, 25 per quiz, 30 per assignment (or its steps). Green under 30, blue up to 75, red above.</div>`;
+    $$('.wd-ev').forEach(b => b.onclick = async () => { const evs = await loadEvents(true); eventModal(evs.find(e => e.id === b.dataset.ev)); });
+    $$('.wd-add').forEach(b => b.onclick = () => eventModal(null, b.dataset.date));
+    $$('.wd-task input').forEach(c => c.onchange = async () => { c.closest('.wd-task').classList.toggle('done', c.checked); try { await api.patch(`/study/${c.dataset.set}/plan`, { taskId: c.dataset.task, done: c.checked }); } catch (e) { toast(e.message, 'err'); } });
+    $$('.wd-task .mv').forEach(b => b.onclick = async (e) => { e.preventDefault(); const days = W.days.filter(d => d.date >= today); const m = modal(`<h2>Move task to…</h2><div class="nb-list">${days.map(d => `<button class="nb-row" data-date="${d.date}"><span class="chip ${d.load === 'heavy' ? 'red' : d.load === 'ok' ? 'blue' : 'green'}">${fmtMin(d.minutes)}</span><div><b>${fmtDate(d.date)}</b><span class="muted small">${d.load === 'heavy' ? 'already heavy' : d.load === 'free' ? 'free' : 'has room'}</span></div></button>`).join('')}</div><div class="actions"><button class="btn" data-close>Cancel</button></div>`); $$('.nb-row', m.el).forEach(x => x.onclick = async () => { m.close(); try { await api.patch(`/study/${b.dataset.set}/plan`, { taskId: b.dataset.task, date: x.dataset.date }); weekView({}, { start }); } catch (err) { toast(err.message, 'err'); } }); });
+    const rb = $('#rebalance'); if (rb) rb.onclick = async () => { busy(rb, true, 'Rebalancing…'); try { const r = await api('/week/rebalance', { body: { start, today } }); if (!r.moves.length) toast('Nothing could move: tasks sit right before their tests, or every day is full.'); else toast(`Moved ${plural(r.moves.length, 'task')} to lighter days`, 'ok'); weekView({}, { start }); } catch (e) { toast(e.message, 'err'); busy(rb, false); } };
+  };
+  draw(W);
+}

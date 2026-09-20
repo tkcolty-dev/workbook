@@ -43,7 +43,7 @@ export async function gradesView(_, q = {}) {
 }
 
 function classModal(c) {
-  const isNew = !c; c = c || { name: '', subject: '', color: COLORS[Math.floor(Math.random() * 8)], target: 90, scale: 'plusminus', categories: [{ id: uid(), name: 'Tests', weight: 40, drop: 0 }, { id: uid(), name: 'Homework', weight: 30, drop: 0 }, { id: uid(), name: 'Quizzes', weight: 20, drop: 0 }, { id: uid(), name: 'Participation', weight: 10, drop: 0 }], entries: [] };
+  const isNew = !c; c = c || { name: '', subject: '', color: COLORS[Math.floor(Math.random() * 8)], target: state.user?.settings?.gradeTarget || 90, scale: state.user?.settings?.gradeScale || 'plusminus', categories: [{ id: uid(), name: 'Tests', weight: 40, drop: 0 }, { id: uid(), name: 'Homework', weight: 30, drop: 0 }, { id: uid(), name: 'Quizzes', weight: 20, drop: 0 }, { id: uid(), name: 'Participation', weight: 10, drop: 0 }], entries: [] };
   let cats = c.categories.map(k => ({ ...k })); let col = c.color;
   const m = modal(`<h2>${isNew ? 'Add a class' : 'Class settings'}</h2>
     <div class="row"><div class="field"><label for="cName">Class</label><input type="text" id="cName" value="${esc(c.name)}" placeholder="e.g. Algebra 1"></div><div class="field"><label for="cTarget">Target grade %</label><input type="number" id="cTarget" min="0" max="100" value="${c.target}"></div></div>

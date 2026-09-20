@@ -8,7 +8,7 @@ export async function reviewView(_, q = {}) {
   const main = shell('Review', loading());
   const seq = navId();
   const setId = q.set || '';
-  const data = await api('/review?limit=60' + (setId ? '&set=' + encodeURIComponent(setId) : '')); if (stale(seq)) return;
+  const data = await api('/review?limit=' + (state.user?.settings?.reviewLimit || 40) + (setId ? '&set=' + encodeURIComponent(setId) : '')); if (stale(seq)) return;
   updateReviewBadge(data.due);
   R = { cards: data.cards, i: 0, flipped: false, done: 0, again: 0, setId, ratings: { again: 0, hard: 0, good: 0, easy: 0 } };
   const maxBox = Math.max(1, ...data.byBox);

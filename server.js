@@ -75,6 +75,7 @@ app.use((req, res, next) => {
   const sid = parseCookies(req).dwb_sid;
   const s = sid && store.sessions.get(sid);
   req.user = s ? store.users.byId(s.userId) : null;
+  if (req.user?.deleted) req.user = null;
   req.sid = sid;
   if (s && req.user) {
     // slide the expiry: refresh cookie + lastSeen at most once a day
@@ -118,6 +119,7 @@ app.patch('/api/me', auth, (req, res) => {
   store.users.update(req.user, patch);
   res.json({ user: store.users.public(req.user) });
 });
+app.post('/api/auth/logout-all', auth, (req, res) => { store.sessions.destroyAllFor(req.user.id, req.sid); res.json({ ok: true }); });
 app.post('/api/auth/password', auth, (req, res) => {
   const { current, password } = req.body || {};
   if (!store.users.verify(req.user, String(current || ''))) return err(res, 401, 'Current password is wrong');
@@ -138,7 +140,8 @@ app.get('/api/home', auth, (req, res) => {
   const due = study.reduce((n, s) => n + s.cardsDue, 0), totalCards = study.reduce((n, s) => n + s.cardCount, 0);
   const planToday = []; for (const s of d.study) for (const day of s.plan?.days || []) if (day.date === today) for (const t of day.tasks) planToday.push({ ...t, setId: s.id, set: s.title });
   const streak = streakOf(d);
-  res.json({ notebooks, recent, events: events.slice(0, 8), study: study.slice(0, 4), review: { due, total: totalCards }, planToday, streak, trash: d.trash.length });
+  const week = weekData(d, today).map(x => ({ date: x.date, minutes: x.minutes, load: x.load, n: x.events.filter(e => !e.done).length + x.tasks.filter(t => !t.done).length }));
+  res.json({ notebooks, recent, events: events.slice(0, 8), study: study.slice(0, 4), review: { due, total: totalCards }, planToday, streak, trash: d.trash.length, inbox: d.pages.filter(p => p.sort?.status === 'pending').length, week });
 });
 function streakOf(d) {
   const set = new Set(Object.keys(d.activity || {}));
@@ -234,13 +237,14 @@ function sharedCtx(req, res) {
 app.get('/api/shared/:token', (req, res) => {
   const c = sharedCtx(req, res); if (!c) return;
   const { sh, d } = c;
+  sh.views = (sh.views || 0) + 1; sh.lastViewAt = Date.now(); store.saveShares();
   if (sh.kind === 'notebook') {
     const nb = d.notebooks.find(n => n.id === sh.id); if (!nb) return res.status(404).json({ error: 'Gone' });
     const pages = d.pages.filter(p => p.notebookId === nb.id).sort((a, b) => a.index - b.index).map(p => ({ id: p.id, index: p.index, title: p.title, transcript: p.transcript, keyPoints: p.keyPoints, vocab: p.vocab, figures: p.figures || [], rev: p.rev || 0 }));
     return res.json({ kind: 'notebook', by: sh.by, notebook: { id: nb.id, name: nb.name, subject: nb.subject, color: nb.color, pages } });
   }
   const st = d.study.find(x => x.id === sh.id); if (!st) return res.status(404).json({ error: 'Gone' });
-  res.json({ kind: 'study', by: sh.by, study: { id: st.id, title: st.title, subject: st.subject, sheet: st.sheet, online: st.online, cards: (st.cards || []).map(c => ({ id: c.id, front: c.front, back: c.back, hint: c.hint })), tests: (st.tests || []).map(t => ({ id: t.id, title: t.title, description: t.description, style: t.style, questions: t.questions.map(q => ({ id: q.id, type: q.type, question: q.question, choices: q.choices, hint: q.hint })) })) } });
+  res.json({ kind: 'study', by: sh.by, study: { id: st.id, title: st.title, subject: st.subject, sheet: st.sheet, online: st.online, cards: (st.cards || []).map(c => ({ id: c.id, front: c.front, back: c.back, hint: c.hint })), tests: (st.tests || []).map(t => ({ id: t.id, title: t.title, description: t.description, style: t.style, ownerBest: t.attempts?.length ? Math.max(...t.attempts.map(a => a.percent)) : null, friends: (t.friends || []).slice(-30).map(f => ({ name: f.name, percent: f.percent, at: f.at })), questions: t.questions.map(q => ({ id: q.id, type: q.type, question: q.question, choices: q.choices, hint: q.hint })) })) } });
 });
 app.get('/api/shared/:token/image/:pageId', async (req, res) => {
   const c = sharedCtx(req, res); if (!c) return;
@@ -280,9 +284,25 @@ app.post('/api/shared/:token/grade/:tid', async (req, res) => {
   const st = d.study.find(x => x.id === sh.id); const test = st?.tests.find(t => t.id === req.params.tid);
   if (!test) return res.status(404).json({ error: 'Test not found' });
   req.body.dryRun = true; req.params.id = st.id;
-  // reuse the grading logic by faking the owner
+  // reuse the grading logic by faking the owner; the friend's score is kept on the test (scoreboard), not as an attempt
+  req.friend = { name: str(req.body.name, 40).trim() || (req.user ? (req.user.name || req.user.username) : 'A friend'), userId: req.user?.id || null };
   req.user = store.users.byId(sh.userId);
   return gradeHandler(req, res);
+});
+// Friends page: your shared links, who looked, and every friend score on your tests
+app.get('/api/friends', auth, (req, res) => {
+  const d = store.db(req.user.id); const shares = getShares();
+  const mine = Object.entries(shares).filter(([, v]) => v.userId === req.user.id).map(([token, v]) => {
+    const base = { token, kind: v.kind, id: v.id, createdAt: v.createdAt, views: v.views || 0, lastViewAt: v.lastViewAt || null, url: `${req.protocol}://${req.get('host')}/#/s/${token}` };
+    if (v.kind === 'notebook') { const nb = store.findNb(d, v.id); return nb ? { ...base, title: nb.name, sub: `${store.pagesOf(d, nb.id).length} pages`, color: nb.color } : null; }
+    const st = store.findStudy(d, v.id); if (!st) return null;
+    const tests = (st.tests || []).map(t => ({ id: t.id, title: t.title, mine: t.attempts?.length ? Math.max(...t.attempts.map(a => a.percent)) : null, friends: (t.friends || []).slice(-50).sort((a, b) => b.percent - a.percent) }));
+    return { ...base, title: st.title, sub: `${(st.cards || []).length} cards · ${tests.length} tests`, tests };
+  }).filter(Boolean).sort((a, b) => (b.lastViewAt || b.createdAt) - (a.lastViewAt || a.createdAt));
+  const activity = []; for (const s of mine) for (const t of s.tests || []) for (const f of t.friends) activity.push({ name: f.name, percent: f.percent, at: f.at, test: t.title, set: s.title, setId: s.id, testId: t.id, mine: t.mine });
+  activity.sort((a, b) => b.at - a.at);
+  const toBeat = activity.filter(a => a.mine == null || a.percent > a.mine).slice(0, 5);
+  res.json({ shares: mine, activity: activity.slice(0, 40), toBeat, totalViews: mine.reduce((n, s) => n + s.views, 0) });
 });
 
 // ---------- notebooks & pages ----------
@@ -530,6 +550,7 @@ Then return ONLY JSON:
  "keyPoints": ["3-7 most important facts/ideas/formulas on this page (LaTeX for math)"],
  "vocab": [{"term":"...","definition":"..."}],
  "topics": ["1-4 short topic tags"],
+ "subject": "the school subject this page belongs to, one or two words (e.g. Biology, Algebra, US History, Spanish)",
  "figures": [{"label":"short name, e.g. 'Map of Europe 1914' or 'Diagram of a plant cell'","box":[0.1,0.4,0.5,0.3],"kind":"diagram|map|graph|drawing|photo|table"}],
  "suggestions": [{"title":"e.g. Ch. 5 Cell Test","type":"test|quiz|homework|project|reminder","date":"YYYY-MM-DD or null","dateText":"the words on the page, e.g. TEST FRI","notes":"what it says it covers"}],
  "readability": "good" | "fair" | "poor"
@@ -545,7 +566,9 @@ Then return ONLY JSON:
     const oldSug = Array.isArray(p.suggestions) ? p.suggestions : [];
     p.suggestions = Array.isArray(out.suggestions) ? out.suggestions.filter(sg => sg && sg.title).slice(0, 8).map(sg => { const prev = oldSug.find(o => o.title === sg.title); return { title: String(sg.title).slice(0, 120), type: ['test', 'quiz', 'homework', 'project', 'reminder'].includes(sg.type) ? sg.type : 'test', date: (() => { let dt = /^\d{4}-\d{2}-\d{2}$/.test(String(sg.date || '')) ? sg.date : null; if (dt && dt < todayISO) { let y = +dt.slice(0, 4); while (dt < todayISO && y < +todayISO.slice(0, 4) + 2) { y++; dt = y + dt.slice(4); } } return dt; })(), dateText: String(sg.dateText || ''), notes: String(sg.notes || '').slice(0, 500), done: !!prev?.done }; }) : [];
     p.readability = out.readability || '';
+    p.subject = str(out.subject, 40).trim();
     p.status = 'ready';
+    applySort(d, p, req.user);
     store.save(req.user.id);
     res.json(publicPage(p));
   } catch (e) {
@@ -1121,6 +1144,7 @@ async function gradeHandler(req, res) {
     for (const q of qs) { const r = results[q.id]; score += r.score !== undefined ? r.score : (r.correct ? 1 : 0); }
     const attempt = { id: store.uid(), at: Date.now(), answers, results, score, total, percent: total ? Math.round(100 * score / total) : 0, subset: only ? [...only] : null, timeSpent: req.body.timeSpent || null, mode: req.body.mode || 'exam' };
     if (!dryRun) { test.attempts.push(attempt); s.updatedAt = Date.now(); store.save(req.user.id); logActivity(req.user.id, 'test'); }
+    if (req.friend) { test.friends = [...(test.friends || []), { id: attempt.id, name: req.friend.name, userId: req.friend.userId, percent: attempt.percent, score, total, at: attempt.at }].slice(-100); s.updatedAt = Date.now(); store.save(req.user.id); attempt.friends = test.friends.slice(-30).map(f => ({ name: f.name, percent: f.percent, at: f.at })); attempt.ownerBest = test.attempts?.length ? Math.max(...test.attempts.map(a => a.percent)) : null; }
     res.json(attempt);
   } catch (e) { console.error('grade:', e.message); res.status(500).json({ error: e.message }); }
 }
@@ -1215,8 +1239,164 @@ Return ONLY JSON: {"days":[{"date":"YYYY-MM-DD","focus":"short theme for the day
 app.patch('/api/study/:id/plan', auth, (req, res) => {
   const [d, s] = getStudy(req, res); if (!s) return;
   if (req.body.clear) { s.plan = null; store.save(req.user.id); return res.json({ ok: true }); }
-  for (const day of s.plan?.days || []) for (const t of day.tasks) if (t.id === req.body.taskId) { t.done = !!req.body.done; if (t.done) logActivity(req.user.id, 'plan'); }
+  if (isISODate(req.body.date) && req.body.taskId) movePlanTask(s, req.body.taskId, req.body.date);
+  else for (const day of s.plan?.days || []) for (const t of day.tasks) if (t.id === req.body.taskId) { t.done = !!req.body.done; if (t.done) logActivity(req.user.id, 'plan'); }
   store.save(req.user.id); res.json(s.plan);
+});
+function movePlanTask(s, taskId, date) {
+  if (!s.plan) return false;
+  let task = null; for (const day of s.plan.days) { const i = day.tasks.findIndex(t => t.id === taskId); if (i >= 0) { task = day.tasks.splice(i, 1)[0]; break; } }
+  if (!task) return false;
+  let day = s.plan.days.find(x => x.date === date);
+  if (!day) { day = { date, focus: '', tasks: [] }; s.plan.days.push(day); s.plan.days.sort((a, b) => a.date.localeCompare(b.date)); }
+  day.tasks.push(task); s.plan.days = s.plan.days.filter(x => x.tasks.length); s.updatedAt = Date.now(); return true;
+}
+
+// ---------- week view: everything due + planned per day, with a load score and a rebalance ----------
+const EST_MIN = { test: 45, quiz: 25, homework: 30, project: 60, reminder: 5, other: 10 };
+function weekData(d, startISO) {
+  const days = []; const start = Date.parse(startISO + 'T00:00:00Z');
+  for (let i = 0; i < 7; i++) {
+    const iso = new Date(start + i * 86400000).toISOString().slice(0, 10);
+    const events = d.events.filter(e => e.date === iso).map(e => ({ id: e.id, title: e.title, type: e.type, subject: e.subject || '', time: e.time || '', done: !!e.done, studyId: e.studyId || null, est: e.done ? 0 : (e.subtasks?.length ? e.subtasks.filter(s => !s.done).reduce((n, s) => n + (s.minutes || 15), 0) : EST_MIN[e.type] || 10) }));
+    const tasks = []; for (const s of d.study) for (const day of s.plan?.days || []) if (day.date === iso) for (const t of day.tasks) tasks.push({ ...t, setId: s.id, set: s.title, eventDate: s.eventId ? store.findEvent(d, s.eventId)?.date || null : null });
+    const minutes = events.reduce((n, e) => n + e.est, 0) + tasks.filter(t => !t.done).reduce((n, t) => n + t.minutes, 0);
+    days.push({ date: iso, events, tasks, minutes, load: minutes === 0 ? 'free' : minutes < 30 ? 'light' : minutes <= 75 ? 'ok' : 'heavy' });
+  }
+  return days;
+}
+app.get('/api/week', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const start = isISODate(req.query.start) ? req.query.start : isoDate();
+  const days = weekData(d, start);
+  res.json({ start, days, total: days.reduce((n, x) => n + x.minutes, 0), heavy: days.filter(x => x.load === 'heavy').length });
+});
+// Move undone plan tasks off heavy days onto the lightest days of the same week (never past the set's test date, never into the past).
+app.post('/api/week/rebalance', auth, (req, res) => {
+  const d = store.db(req.user.id); const start = isISODate(req.body.start) ? req.body.start : isoDate(); const today = isISODate(req.body.today) ? req.body.today : isoDate();
+  const moves = []; let guard = 0;
+  while (guard++ < 40) {
+    const days = weekData(d, start);
+    const heavy = days.filter(x => x.load === 'heavy' && x.date >= today).sort((a, b) => b.minutes - a.minutes)[0]; if (!heavy) break;
+    const movable = heavy.tasks.filter(t => !t.done).sort((a, b) => b.minutes - a.minutes); if (!movable.length) break;
+    let moved = false;
+    for (const t of movable) {
+      const target = days.filter(x => x.date !== heavy.date && x.date >= today && (!t.eventDate || x.date < t.eventDate) && x.minutes + t.minutes <= 75).sort((a, b) => a.minutes - b.minutes)[0];
+      if (!target) continue;
+      const s = store.findStudy(d, t.setId); if (s && movePlanTask(s, t.id, target.date)) { moves.push({ task: t.text, set: t.set, from: heavy.date, to: target.date }); moved = true; break; }
+    }
+    if (!moved) break;
+  }
+  if (moves.length) store.save(req.user.id);
+  const days = weekData(d, start);
+  res.json({ moves, days, heavy: days.filter(x => x.load === 'heavy').length });
+});
+
+// ---------- auto-sort: after a page is read, suggest (or apply) the notebook that matches its subject ----------
+const normSub = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').trim();
+const GENERIC_NB = /^(my notebook|notebook|inbox|scans?|misc|untitled|new notebook)$/i;
+function matchNotebook(d, subject, excludeId) {
+  const s = normSub(subject); if (!s) return null;
+  const words = s.split(/\s+/).filter(w => w.length > 2);
+  let best = null, bestScore = 0;
+  for (const nb of d.notebooks) {
+    if (nb.id === excludeId) continue;
+    const name = normSub(nb.name), sub = normSub(nb.subject);
+    let score = 0;
+    if (sub === s || name === s) score = 3; else if ((sub && (sub.includes(s) || s.includes(sub))) || name.includes(s) || s.includes(name)) score = 2; else if (words.some(w => sub.includes(w) || name.includes(w))) score = 1;
+    if (score > bestScore) { best = nb; bestScore = score; }
+  }
+  return bestScore ? { nb: best, score: bestScore } : null;
+}
+function applySort(d, p, user) {
+  const mode = user.settings?.autoSort || 'ask'; if (mode === 'off' || !p.subject) { return; }
+  const cur = store.findNb(d, p.notebookId); if (!cur) return;
+  const curMatches = normSub(cur.subject) && (normSub(cur.subject) === normSub(p.subject) || normSub(cur.subject).includes(normSub(p.subject)) || normSub(p.subject).includes(normSub(cur.subject)));
+  if (curMatches) { p.sort = undefined; return; }
+  const generic = GENERIC_NB.test(cur.name.trim()) && !cur.subject;
+  const m = matchNotebook(d, p.subject, cur.id);
+  if (m && m.score >= 2) {
+    if (mode === 'auto' && (generic || m.score === 3)) { const from = cur; p.notebookId = m.nb.id; p.index = store.nextIndex(d, m.nb.id); store.reindex(d, from.id); m.nb.updatedAt = Date.now(); p.sort = { status: 'done', auto: true, from: from.name, to: m.nb.name, at: Date.now() }; return; }
+    p.sort = { status: 'pending', notebookId: m.nb.id, name: m.nb.name, subject: p.subject, at: Date.now() }; return;
+  }
+  if (generic) p.sort = { status: 'pending', create: p.subject, subject: p.subject, at: Date.now() };
+}
+app.get('/api/inbox', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const pending = d.pages.filter(p => p.sort?.status === 'pending').sort((a, b) => b.createdAt - a.createdAt).map(p => { const nb = store.findNb(d, p.notebookId); return { ...pageSummary(p), notebook: nb?.name || '', color: nb?.color || 'navy', subject: p.subject || '', sort: p.sort }; });
+  const recent = d.pages.filter(p => p.sort?.status === 'done').sort((a, b) => (b.sort.at || 0) - (a.sort.at || 0)).slice(0, 12).map(p => ({ id: p.id, title: p.title || 'Page ' + p.index, from: p.sort.from, to: p.sort.to, at: p.sort.at, auto: !!p.sort.auto }));
+  res.json({ pending, recent, mode: req.user.settings?.autoSort || 'ask' });
+});
+const COLORS_POOL = ['navy', 'green', 'purple', 'orange', 'teal', 'pink', 'red', 'yellow'];
+app.post('/api/pages/:id/sort', auth, (req, res) => {
+  const d = store.db(req.user.id); const p = store.findPage(d, req.params.id); if (!p) return err(res, 404, 'Not found');
+  if (req.body.dismiss) { p.sort = { status: 'dismissed', at: Date.now() }; store.save(req.user.id); return res.json({ ok: true }); }
+  let nb = req.body.notebookId ? store.findNb(d, req.body.notebookId) : null;
+  if (!nb && req.body.createName) { nb = { id: store.uid(), name: str(req.body.createName, 80).trim(), subject: str(req.body.createName, 60).trim(), color: COLORS_POOL[d.notebooks.length % COLORS_POOL.length], pageCount: 0, description: '', createdAt: Date.now(), updatedAt: Date.now() }; d.notebooks.push(nb); }
+  if (!nb) return err(res, 400, 'Pick a notebook or a name');
+  const from = store.findNb(d, p.notebookId);
+  if (nb.id !== p.notebookId) { p.notebookId = nb.id; p.index = store.nextIndex(d, nb.id); if (from) store.reindex(d, from.id); nb.updatedAt = Date.now(); }
+  p.sort = { status: 'done', from: from?.name || '', to: nb.name, at: Date.now() };
+  store.save(req.user.id); res.json({ ok: true, notebook: { id: nb.id, name: nb.name, color: nb.color } });
+});
+app.post('/api/inbox/accept-all', auth, (req, res) => {
+  const d = store.db(req.user.id); let n = 0;
+  for (const p of d.pages.filter(x => x.sort?.status === 'pending')) {
+    let nb = p.sort.notebookId ? store.findNb(d, p.sort.notebookId) : null;
+    if (!nb && p.sort.create) { nb = matchNotebook(d, p.sort.create, null)?.nb || null; if (!nb) { nb = { id: store.uid(), name: p.sort.create, subject: p.sort.create, color: COLORS_POOL[d.notebooks.length % COLORS_POOL.length], pageCount: 0, description: '', createdAt: Date.now(), updatedAt: Date.now() }; d.notebooks.push(nb); } }
+    if (!nb) continue;
+    const from = store.findNb(d, p.notebookId);
+    if (nb.id !== p.notebookId) { p.notebookId = nb.id; p.index = store.nextIndex(d, nb.id); if (from) store.reindex(d, from.id); nb.updatedAt = Date.now(); }
+    p.sort = { status: 'done', from: from?.name || '', to: nb.name, at: Date.now() }; n++;
+  }
+  store.save(req.user.id); res.json({ sorted: n });
+});
+
+// ---------- page linking: related pages (shared topics / vocab / title words) and the topic map ----------
+const wordsOf = (s) => new Set(normSub(s).split(/\s+/).filter(w => w.length > 3));
+function relatedPages(d, p, limit = 6) {
+  const topics = new Set((p.topics || []).map(normSub)); const terms = new Set((p.vocab || []).map(v => normSub(v.term))); const tw = wordsOf(p.title);
+  const out = [];
+  for (const q of d.pages) {
+    if (q.id === p.id) continue;
+    const reasons = []; let score = 0;
+    const st = (q.topics || []).map(normSub).filter(t => topics.has(t)); if (st.length) { score += 2 * st.length; reasons.push(...st.slice(0, 2)); }
+    const sv = (q.vocab || []).map(v => normSub(v.term)).filter(t => terms.has(t)); if (sv.length) { score += sv.length; if (!reasons.length) reasons.push(...sv.slice(0, 2)); }
+    const sw = [...wordsOf(q.title)].filter(w => tw.has(w)); if (sw.length) score += 0.5 * sw.length;
+    if (normSub(q.subject) && normSub(q.subject) === normSub(p.subject)) score += 0.5;
+    if (score >= 1) { const nb = store.findNb(d, q.notebookId); out.push({ ...pageSummary(q), notebook: nb?.name || '', color: nb?.color || 'navy', score, reasons: [...new Set(reasons)].slice(0, 3) }); }
+  }
+  return out.sort((a, b) => b.score - a.score || b.createdAt - a.createdAt).slice(0, limit);
+}
+app.get('/api/pages/:id/related', auth, (req, res) => { const d = store.db(req.user.id); const p = store.findPage(d, req.params.id); if (!p) return err(res, 404, 'Not found'); res.json(relatedPages(d, p)); });
+app.get('/api/topics', auth, (req, res) => {
+  const d = store.db(req.user.id); const map = new Map(); const pairs = new Map();
+  for (const p of d.pages) {
+    const ts = [...new Set((p.topics || []).map(t => String(t).trim()).filter(Boolean))];
+    for (const t of ts) { const k = normSub(t); if (!map.has(k)) map.set(k, { key: k, topic: t, n: 0, pages: [], notebooks: new Map() }); const e = map.get(k); e.n++; e.pages.push(p.id); const nb = store.findNb(d, p.notebookId); if (nb) e.notebooks.set(nb.id, { id: nb.id, name: nb.name, color: nb.color }); }
+    for (let i = 0; i < ts.length; i++) for (let j = i + 1; j < ts.length; j++) { const a = normSub(ts[i]), b = normSub(ts[j]); const k = a < b ? a + '|' + b : b + '|' + a; pairs.set(k, (pairs.get(k) || 0) + 1); }
+  }
+  const topics = [...map.values()].map(e => ({ key: e.key, topic: e.topic, n: e.n, pages: e.pages.slice(0, 40), notebooks: [...e.notebooks.values()] })).sort((a, b) => b.n - a.n).slice(0, 120);
+  const keys = new Set(topics.map(t => t.key));
+  const links = [...pairs.entries()].map(([k, n]) => { const [a, b] = k.split('|'); return { a, b, n }; }).filter(l => keys.has(l.a) && keys.has(l.b)).sort((x, y) => y.n - x.n).slice(0, 200);
+  res.json({ topics, links, pages: Object.fromEntries(d.pages.map(p => [p.id, { id: p.id, title: p.title || 'Page ' + p.index, index: p.index, notebookId: p.notebookId, rev: p.rev || 0 }])) });
+});
+
+// ---------- account: export everything (no images), delete account ----------
+app.get('/api/export', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  res.setHeader('Content-Disposition', `attachment; filename="workbook-${req.user.username}-${isoDate()}.json"`);
+  res.json({ exportedAt: new Date().toISOString(), user: store.users.public(req.user), notebooks: d.notebooks, pages: d.pages, events: d.events, study: d.study.map(s => ({ ...s, chat: undefined })), grades: d.grades, activity: d.activity });
+});
+app.delete('/api/me', auth, async (req, res) => {
+  if (!store.users.verify(req.user, String(req.body?.password || ''))) return err(res, 401, 'Wrong password');
+  const d = store.db(req.user.id);
+  for (const p of d.pages) await store.deleteImages(req.user.id, p.id).catch(() => {});
+  await store.purgeTrash(req.user.id, true).catch(() => {});
+  d.notebooks = []; d.pages = []; d.events = []; d.study = []; d.grades = null; d.activity = {}; d.trash = []; store.save(req.user.id);
+  const shares = getShares(); for (const t of Object.keys(shares)) if (shares[t].userId === req.user.id) delete shares[t]; store.saveShares();
+  store.sessions.destroyAllFor(req.user.id, null); store.users.update(req.user, { deleted: true, username: req.user.username + '.deleted.' + Date.now().toString(36), push: [] });
+  res.setHeader('Set-Cookie', 'dwb_sid=; Path=/; Max-Age=0'); res.json({ ok: true });
 });
 
 // ---------- grades: classes with weighted categories; the math happens on the client ----------

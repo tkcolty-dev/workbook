@@ -1,14 +1,17 @@
-import { state, api, stream, $, $$, esc, h, render, md, mdi, mdPage, hydrateFigures, plain, icon, logoSvg, toast, modal, confirm, busy, todayISO, fmtDate, fmtTime, countdown, daysUntil, ago, TYPES, COLORS, MON, DOW, MONTHS, parseISO, loadNotebooks, loadEvents, loadStudy, invalidate, route, go, dispatch, setKeys, getTheme, setTheme, isDark, download, plural, fmtMin, loading, navId, stale } from './core.js';
+import { state, api, stream, $, $$, esc, h, render, md, mdi, mdPage, hydrateFigures, plain, icon, logoSvg, toast, modal, confirm, busy, todayISO, fmtDate, fmtTime, countdown, daysUntil, ago, TYPES, COLORS, MON, DOW, MONTHS, parseISO, loadNotebooks, loadEvents, loadStudy, invalidate, route, go, dispatch, setKeys, getTheme, setTheme, isDark, download, plural, fmtMin, loading, navId, stale, applySettings, saveSettings, settings, ACCENTS } from './core.js';
 import { registerSW, pushStatus, enablePush, disablePush, testPush, isIOS, isStandalone, pushSupported } from './push.js';
 
 // Heavy screens load on demand (scanner + image engine, study room, slideshow, review, grades…)
 const lazy = (mod, fn) => async (...a) => (await import(mod))[fn](...a);
 
 // ---------- shell (rendered once; navigation only swaps the page body) ----------
-const NAV = [
-  ['#/', 'home', 'Home', 'navy'], ['#/notebooks', 'book', 'Notebooks', 'purple'], ['#/scan', 'camera', 'Scan', 'green'], ['#/planner', 'calendar', 'Planner', 'orange'],
-  ['#/study', 'study', 'Study', 'pink'], ['#/homework', 'check', 'Homework', 'red'], ['#/review', 'review', 'Review', 'yellow'], ['#/grades', 'grades', 'Grades', 'teal'], ['#/progress', 'zap', 'Progress', 'black'],
+const NAV_GROUPS = [
+  { g: 'Capture', items: [['#/', 'home', 'Home', 'navy'], ['#/scan', 'camera', 'Scan', 'green'], ['#/notebooks', 'book', 'Notebooks', 'purple'], ['#/inbox', 'inbox', 'Inbox', 'orange'], ['#/topics', 'layers', 'Topics', 'teal']] },
+  { g: 'Study', items: [['#/study', 'study', 'Study', 'pink'], ['#/review', 'review', 'Review', 'yellow'], ['#/homework', 'check', 'Homework', 'red'], ['#/friends', 'users', 'Friends', 'purple']] },
+  { g: 'Plan', items: [['#/planner', 'calendar', 'Planner', 'orange'], ['#/week', 'week', 'Week', 'navy'], ['#/grades', 'grades', 'Grades', 'teal'], ['#/progress', 'zap', 'Progress', 'black']] },
 ];
+const NAV = NAV_GROUPS.flatMap(g => g.items);
+const BADGES = { Review: 'reviewBadge', Inbox: 'inboxBadge' };
 const TAB_COLORS = { navy: '#1f4fd8', purple: '#8253e0', green: '#22a06b', orange: '#f27d3a', pink: '#e85d9a', yellow: '#e0b000', teal: '#1aa5a5', red: '#e2574a', black: '#5b6272' };
 const aiLabel = () => state.ai?.available === false ? '⚠️ AI not set up' : state.ai?.mode === 'cli' ? 'AI: Claude (local)' : state.ai?.mode === 'anthropic' ? 'AI: Claude' : 'AI: ' + (state.ai?.model || '').split(' + ')[0];
 export function shell(active, content) {
@@ -19,7 +22,7 @@ export function shell(active, content) {
     render(`<div class="shell" data-uid="${esc(u?.id || '')}">
       <aside class="sidebar" aria-label="Main navigation">
         <a class="brand" href="#/" style="text-decoration:none;color:inherit">${logoSvg(36)}<div class="name">WorkBook<small>your notebook, digital</small></div></a>
-        <nav class="nav">${NAV.map(([href, ic, label, col]) => `<a href="${href}" data-nav="${label}" style="--tab:${TAB_COLORS[col]}">${icon(ic)}${label}${label === 'Review' ? '<span class="badge hidden" id="reviewBadge"></span>' : ''}</a>`).join('')}</nav>
+        <nav class="nav">${NAV_GROUPS.map(g => `<div class="nav-group"><div class="nav-g">${g.g}</div>${g.items.map(([href, ic, label, col]) => `<a href="${href}" data-nav="${label}" style="--tab:${TAB_COLORS[col]}">${icon(ic)}${label}${BADGES[label] ? `<span class="badge hidden" id="${BADGES[label]}"></span>` : ''}</a>`).join('')}</div>`).join('')}</nav>
         <button class="nav-btn" id="searchBtn" type="button">${icon('search')} Search <kbd class="kbd-hint">⌘K</kbd></button>
         <button class="nav-btn" id="focusBtn" type="button" title="Focus timer (25/5)">${icon('clock')} Focus timer</button>
         <div class="spacer"></div>
@@ -31,23 +34,31 @@ export function shell(active, content) {
         ${state.ai?.available === false ? `<div class="ai-status warn" style="margin-bottom:14px">⚠️ AI features are switched off on this server (no API key). Scanning, notebooks, planner and grades work; AI reading, study sheets, tests and flashcards will be enabled once a key is added.</div>` : ''}
         <div id="view"></div>
       </main>
-      <nav class="tabbar" aria-label="Sections">${NAV.slice(0, 5).map(([href, ic, label]) => label === 'Scan' ? `<a href="${href}" class="scan-tab" data-nav="${label}"><div class="ring">${icon(ic)}</div>Scan</a>` : `<a href="${href}" data-nav="${label}">${icon(ic)}${label}</a>`).join('')}</nav>
+      <nav class="tabbar" aria-label="Sections">${[['#/', 'home', 'Home'], ['#/notebooks', 'book', 'Notebooks'], ['#/scan', 'camera', 'Scan'], ['#/study', 'study', 'Study']].map(([href, ic, label]) => label === 'Scan' ? `<a href="${href}" class="scan-tab" data-nav="${label}"><div class="ring">${icon(ic)}</div>Scan</a>` : `<a href="${href}" data-nav="${label}">${icon(ic)}${label}</a>`).join('')}<a href="#more" id="moreTab" data-nav="More">${icon('grid')}More<span class="badge hidden" id="moreBadge"></span></a></nav>
     </div>`);
     root = $('.shell');
+    $('#moreTab').onclick = (e) => { e.preventDefault(); moreSheet(); };
     const openSearch = () => import('./palette.js').then(m => m.openPalette());
     $('#searchBtn').onclick = openSearch; $('#searchBtnM').onclick = openSearch;
     $('#focusBtn').onclick = () => import('./extras.js').then(m => m.toggleFocusTimer());
     $('#themeBtn').onclick = () => { const next = { auto: 'light', light: 'dark', dark: 'auto' }[getTheme()]; setTheme(next); $('#themeBtn').innerHTML = `${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}`; };
     try { const ft = JSON.parse(localStorage.getItem('dwb_focus') || 'null'); if (ft?.running) import('./extras.js').then(m => m.mountFocusTimer()); } catch {}
   }
-  $$('[data-nav]', root).forEach(a => a.classList.toggle('active', a.dataset.nav === active));
+  $$('[data-nav]', root).forEach(a => a.classList.toggle('active', a.dataset.nav === active || (a.dataset.nav === 'More' && !['Home', 'Notebooks', 'Scan', 'Study'].includes(active))));
   const view = $('#view', root); view.innerHTML = content; window.scrollTo(0, 0);
   updateReviewBadge();
   return view;
 }
 shell.reset = () => { const s = $('.shell'); if (s) s.dataset.uid = 'stale'; };
-const themeLabel = () => ({ auto: 'Auto theme', light: 'Light', dark: 'Dark' })[getTheme()];
-export function updateReviewBadge(n) { if (typeof n === 'number') state.reviewDue = n; const b = $('#reviewBadge'); if (!b) return; const v = state.reviewDue || 0; b.textContent = v > 99 ? '99+' : v; b.classList.toggle('hidden', !v); }
+const themeLabel = () => ({ auto: 'Auto theme', light: 'Light', dark: 'Dark', schedule: 'Dark at night' })[getTheme()] || 'Auto theme';
+const setBadge = (id, v) => { const b = $('#' + id); if (!b) return; b.textContent = v > 99 ? '99+' : v; b.classList.toggle('hidden', !v); };
+export function updateReviewBadge(n) { if (typeof n === 'number') state.reviewDue = n; setBadge('reviewBadge', state.reviewDue || 0); setBadge('inboxBadge', state.inboxN || 0); setBadge('moreBadge', (state.reviewDue || 0) + (state.inboxN || 0)); }
+// phone: the "More" tab opens every section as a grid
+function moreSheet() {
+  const m = modal(`<h2>Everything</h2><div class="more-grid">${NAV_GROUPS.flatMap(g => g.items).map(([href, ic, label, col]) => `<a href="${href}" class="more-item" style="--tab:${TAB_COLORS[col]}">${icon(ic)}<span>${label}</span>${label === 'Review' && state.reviewDue ? `<b class="badge">${state.reviewDue}</b>` : label === 'Inbox' && state.inboxN ? `<b class="badge">${state.inboxN}</b>` : ''}</a>`).join('')}<a href="#/settings" class="more-item" style="--tab:#5b6272">${icon('settings')}<span>Settings</span></a><button type="button" class="more-item" id="moreSearch" style="--tab:#5b6272">${icon('search')}<span>Search</span></button></div>`);
+  $('#moreSearch', m.el).onclick = () => { m.close(); import('./palette.js').then(x => x.openPalette()); };
+  $$('a', m.el).forEach(a => a.addEventListener('click', () => m.close()));
+}
 export const nbCover = (nb, extra = '') => `<div class="nb-cover color-${esc(nb.color || 'navy')} ${extra}"><div class="rings"></div><div class="label"><b>${esc(nb.name)}</b><span>${esc(nb.subject || 'Notebook')}</span></div><div class="foot">${nb.pageCount ? `<div class="progress"><i style="width:${Math.min(100, Math.round(100 * (nb.scanned || 0) / nb.pageCount))}%"></i></div><span>${nb.scanned || 0}/${nb.pageCount}</span>` : `<span></span><span>${plural(nb.scanned || 0, 'page')}</span>`}</div></div>`;
 
 // ---------- auth ----------
@@ -115,7 +126,7 @@ function authView(mode = 'login') {
     busy(btn, true, login ? 'Logging in…' : 'Creating your account…');
     try {
       const r = await api('/auth/' + mode, { body: d });
-      state.user = r.user; invalidate(); shell.reset();
+      state.user = r.user; invalidate(); shell.reset(); applySettings();
       if (d.remember) localStorage.setItem('dwb_last_user', JSON.stringify({ username: r.user.username, name: r.user.name })); else localStorage.removeItem('dwb_last_user');
       go('#/');
     } catch (ex) { err.textContent = ex.message; busy(btn, false); form.classList.remove('shake'); void form.offsetWidth; form.classList.add('shake'); if (login && last?.username) { $('#userField').classList.remove('hidden'); } }
@@ -128,7 +139,7 @@ async function homeView() {
   const seq = navId();
   const H = await api('/home?today=' + todayISO()); if (stale(seq)) return;
   state.notebooks = H.notebooks; state.events = null; // events list here is a slice; the planner loads the full list
-  updateReviewBadge(H.review.due);
+  state.inboxN = H.inbox; updateReviewBadge(H.review.due);
   const today = todayISO();
   const upcoming = H.events;
   const tests = upcoming.filter(e => e.type === 'test' || e.type === 'quiz');
@@ -146,6 +157,8 @@ async function homeView() {
       <a class="t act" href="${H.planToday.length ? '#planToday' : '#/study'}"><span class="lbl">Study plan today</span><b>${H.planToday.length ? planLeft : '—'}</b><span>${H.planToday.length ? (planLeft ? plural(planLeft, 'task') + ' left' : 'all done 🎉') : 'no plan yet'}</span></a>
       <a class="t act" href="#/progress"><span class="lbl">Streak</span><b>${H.streak}${H.streak ? '🔥' : ''}</b><span>${H.streak ? plural(H.streak, 'day') + ' in a row' : 'do anything today to start'}</span></a>
     </div>
+    ${H.inbox ? `<a class="notice" href="#/inbox">${icon('inbox')} <b>${plural(H.inbox, 'page')}</b> look like they belong in a different notebook. Sort them ${icon('chevR')}</a>` : ''}
+    <a class="mini-week" href="#/week" aria-label="This week's load">${H.week.map(w => { const d = parseISO(w.date); return `<span class="mw ${w.load} ${w.date === today ? 'today' : ''}"><small>${DOW[d.getDay()]}</small><span class="bar"><i style="height:${Math.max(3, Math.min(26, Math.round(26 * w.minutes / 90)))}px"></i></span><b>${w.n || ''}</b></span>`; }).join('')}<span class="mw-lbl">This week ${icon('chevR')}</span></a>
     <div class="hero">
       <div>
         ${H.planToday.length ? `<div class="card" id="planToday" style="margin-bottom:16px"><div class="card-head"><h3>${icon('list', 'muted')} Today's study plan</h3><span class="muted small">${H.planToday.filter(t => t.done).length}/${H.planToday.length} done</span></div><div class="plan-today">${H.planToday.map(t => `<label class="task ${t.done ? 'done' : ''}"><input type="checkbox" data-set="${t.setId}" data-task="${t.id}" ${t.done ? 'checked' : ''}><span class="txt">${esc(t.text)}<small>${esc(t.set)} · ${fmtMin(t.minutes)}</small></span><span class="kind ${esc(t.kind)}">${esc(t.kind)}</span></label>`).join('')}</div></div>` : ''}
@@ -334,6 +347,7 @@ async function pageView({ id }, q = {}) {
     <div class="page-head" style="margin-bottom:14px"><div><h1 id="ptitle" contenteditable="true" spellcheck="false" title="Click to rename" style="outline:none;border-bottom:1px dashed transparent">${esc(page.title || 'Page ' + page.index)}</h1><div class="sub">${esc(nb.name)} · page ${page.index} of ${nb.pages.length} · scanned ${ago(page.createdAt)}${page.readability ? ' · handwriting: ' + esc(page.readability) : ''}</div></div>
       <div class="btn-row"><button class="btn primary" id="testThis">${icon('quiz')} Test on this</button><button class="btn" id="checkHw">${icon('check')} Check homework</button><button class="btn" id="moreP" aria-haspopup="menu">${icon('more')} More</button></div></div>
     ${sugs.length ? `<div class="card sun sug-card"><h3>📅 Spotted on this page</h3>${sugs.map((sg, k) => `<div class="sug-row"><div><b>${esc(sg.title)}</b> <span class="chip">${esc(TYPES[sg.type] || sg.type)}</span><div class="muted small">${sg.dateText ? '“' + esc(sg.dateText) + '” · ' : ''}${sg.date ? fmtDate(sg.date) + ' · ' + countdown(sg.date) : 'date unknown, pick one'}${sg.notes ? ' · ' + esc(sg.notes) : ''}</div></div><div class="btn-row"><button class="btn sm primary addSug" data-k="${k}">${icon('plus')} Add to planner</button><button class="btn sm ghost dismissSug" data-k="${k}">Dismiss</button></div></div>`).join('')}</div>` : ''}
+    ${page.sort?.status === 'pending' ? `<div class="notice" id="sortNotice">${icon('inbox')} This page looks like <b>${esc(page.subject || page.sort.subject)}</b>. ${page.sort.notebookId ? `Move it to <b>${esc(page.sort.name)}</b>?` : `Make a <b>${esc(page.sort.create)}</b> notebook for it?`}<span class="btn-row" style="margin-left:auto"><button class="btn sm primary" id="sortYes">Yes</button><button class="btn sm ghost" id="sortNo">Keep here</button></span></div>` : ''}
     <div id="hwBox">${page.homework ? homeworkHtml(page.homework) : ''}</div>
     <div class="viewer">
       <div><div class="btn-row" style="justify-content:space-between;margin-bottom:8px"><div class="seg imgtools"><button class="active" data-k="enh">Enhanced</button><button data-k="orig">Original</button></div><span class="muted small">${page.figures?.length ? '🖼 ' + plural(page.figures.length, 'picture') + ' kept · ' : ''}click to zoom</span></div><div class="imgbox" id="imgbox"><img id="pimg" src="/api/pages/${page.id}/image?kind=enh&r=${page.rev || 0}" alt="Scan of page ${page.index}"></div>
@@ -348,10 +362,13 @@ async function pageView({ id }, q = {}) {
         <div class="tool-out" id="toolOut"></div>
         ${page.keyPoints?.length ? `<div class="card" style="margin-top:16px"><h3>Key points</h3><ul class="kp">${page.keyPoints.map(k => `<li>${mdi(k)}</li>`).join('')}</ul></div>` : ''}
         ${page.vocab?.length ? `<div class="card" style="margin-top:16px"><h3>Vocabulary</h3><div class="vocab">${page.vocab.map(v => `<div><b>${mdi(v.term)}</b> — ${mdi(v.definition)}</div>`).join('')}</div></div>` : ''}
-        ${page.topics?.length ? `<div class="chips" style="margin-top:12px">${page.topics.map(t => `<a class="chip blue" href="#/notebook/${nb.id}" style="text-decoration:none">${esc(t)}</a>`).join('')}</div>` : ''}
+        ${page.topics?.length ? `<div class="chips" style="margin-top:12px">${page.topics.map(t => `<a class="chip blue" href="#/topics?t=${encodeURIComponent(String(t).toLowerCase().replace(/[^a-z0-9 ]/g, '').trim())}" style="text-decoration:none">${esc(t)}</a>`).join('')}</div>` : ''}
+        <div id="related"></div>
       </div>
     </div>`;
   hydrateFigures($('#tread'), page);
+  api('/pages/' + page.id + '/related').then(rel => { const box = $('#related'); if (!box || !rel.length) return; box.innerHTML = `<div class="card" style="margin-top:16px"><div class="card-head"><h3>${icon('layers', 'muted')} Related pages</h3><a class="btn sm ghost" href="#/topics">Topic map ${icon('chevR')}</a></div><div class="recent-list">${rel.map(r => `<a class="recent-row" href="#/page/${r.id}"><div class="rthumb" style="background-image:url('/api/pages/${r.id}/image?kind=thumb&r=${r.rev}')"></div><div class="rinfo"><b>${esc(r.title || 'Page ' + r.index)}</b><span class="muted small"><span class="nb-dot color-${esc(r.color)}"></span>${esc(r.notebook)} · p.${r.index}${r.reasons.length ? ' · ' + esc(r.reasons.join(', ')) : ''}</span></div>${icon('chevR', 'muted')}</a>`).join('')}</div></div>`; }).catch(() => {});
+  const sy = $('#sortYes'); if (sy) { sy.onclick = async () => { busy(sy, true, 'Moving…'); try { const r = await api('/pages/' + page.id + '/sort', { body: page.sort.notebookId ? { notebookId: page.sort.notebookId } : { createName: page.sort.create } }); invalidate(); toast('Moved to ' + r.notebook.name, 'ok'); go('#/page/' + page.id); dispatch(); } catch (e) { toast(e.message, 'err'); busy(sy, false); } }; $('#sortNo').onclick = async () => { await api('/pages/' + page.id + '/sort', { body: { dismiss: true } }); $('#sortNotice').remove(); }; }
   $$('.imgtools button').forEach(b => b.onclick = () => { $$('.imgtools button').forEach(x => x.classList.remove('active')); b.classList.add('active'); kind = b.dataset.k; $('#pimg').src = `/api/pages/${page.id}/image?kind=${kind}&r=${page.rev || 0}`; });
   $('#imgbox').onclick = () => lightbox($('#pimg').src, `Page ${page.index}`);
   $('#mRead').onclick = () => { $('#mRead').classList.add('active'); $('#mEdit').classList.remove('active'); $('#tread').classList.remove('hidden'); $('#tedit').classList.add('hidden'); $('#tsave').classList.add('hidden'); };
@@ -573,36 +590,87 @@ async function settingsView(_, q = {}) {
   const seq = navId();
   const [st, trash, smsHtml] = await Promise.all([pushStatus(), api('/trash').catch(() => ({ items: [], days: 30 })), import('./extras.js').then(m => m.smsSettingsHtml())]);
   if (stale(seq)) return;
-  const prefs = state.user.settings?.reminders || {};
+  const S = settings(); const prefs = S.reminders || {};
   const theme = getTheme();
-  main.innerHTML = `<div class="page-head"><div><h1>Settings</h1><div class="sub">Look, reminders, account and the trash.</div></div></div>
-    <div class="grid cols-2">
-    <div style="display:flex;flex-direction:column;gap:16px">
-    <div class="card"><h3>Appearance</h3><div class="seg" id="themeSeg" role="radiogroup" aria-label="Theme"><button data-t="auto" class="${theme === 'auto' ? 'active' : ''}">Auto</button><button data-t="light" class="${theme === 'light' ? 'active' : ''}">${icon('sun')} Light</button><button data-t="dark" class="${theme === 'dark' ? 'active' : ''}">${icon('moon')} Dark</button></div><div class="help" style="margin-top:6px">Auto follows your device. Keyboard: press <kbd>?</kbd> anywhere for shortcuts, <kbd>⌘K</kbd> to search.</div></div>
-    <div class="card"><h3>🔔 Reminders</h3><p class="small muted" style="margin:4px 0 10px">WorkBook pings this device when it's time to study: <b>3 days before</b> a test (4pm), <b>the day before</b> (6pm), and <b>the morning of</b> (7am). Homework and projects: day before + day of. Flashcards: a 4pm nudge when 8+ are due.</p>
+  const seg = (id, opts, cur) => `<div class="seg" id="${id}" role="radiogroup">${opts.map(([v, l]) => `<button type="button" data-v="${v}" class="${cur === v ? 'active' : ''}">${l}</button>`).join('')}</div>`;
+  const tog = (key, label, help, on) => `<label class="toggle"><span><b>${label}</b>${help ? `<small>${help}</small>` : ''}</span><input type="checkbox" data-set="${key}" ${on ? 'checked' : ''}><i></i></label>`;
+  const sections = [['look', 'Appearance', 'palette'], ['scan', 'Scanning', 'camera'], ['study', 'Studying', 'study'], ['plan', 'Planner', 'calendar'], ['remind', 'Reminders', 'bell'], ['grades', 'Grades', 'grades'], ['data', 'Your data', 'shield'], ['account', 'Account', 'key']];
+  main.innerHTML = `<div class="page-head"><div><h1>Settings</h1><div class="sub">Saved to your account, so every device you log in on looks and behaves the same.</div></div></div>
+    <div class="settings-layout">
+    <nav class="settings-nav" aria-label="Settings sections">${sections.map(([id, l, ic]) => `<a href="#/settings?s=${id}" data-s="${id}" class="${(q.s || 'look') === id ? 'active' : ''}">${icon(ic)}${l}</a>`).join('')}</nav>
+    <div class="settings-body">
+    <section class="card set-sec" id="s-look"><h3>${icon('palette')} Appearance</h3>
+      <div class="set-row"><div><b>Theme</b><small>Auto follows your device. “Dark at night” is dark from 7pm to 7am.</small></div>${seg('themeSeg', [['auto', 'Auto'], ['light', 'Light'], ['dark', 'Dark'], ['schedule', 'Dark at night']], theme)}</div>
+      <div class="set-row"><div><b>Accent color</b><small>Buttons, links and highlights.</small></div><div class="swatches">${Object.entries(ACCENTS).map(([k, v]) => `<div class="swatch ${(S.accent || 'blue') === k ? 'active' : ''}" data-accent="${k}" style="--c:${v}" role="radio" tabindex="0" aria-label="${k}"></div>`).join('')}</div></div>
+      <div class="set-row"><div><b>Text size</b></div>${seg('sizeSeg', [['small', 'Small'], ['normal', 'Normal'], ['large', 'Large']], S.fontSize || 'normal')}</div>
+      ${tog('reduceMotion', 'Reduce motion', 'Turns off page and card animations.', !!S.reduceMotion)}
+      ${tog('compact', 'Compact layout', 'Tighter spacing, more on screen.', !!S.compact)}
+    </section>
+    <section class="card set-sec" id="s-scan"><h3>${icon('camera')} Scanning</h3>
+      <div class="set-row"><div><b>Default look</b><small>Applied to new scans. Change any page later with Adjust.</small></div><select class="input sm" data-set="scanFilter" style="width:auto"><option value="enhanced" ${(S.scanFilter || 'enhanced') === 'enhanced' ? 'selected' : ''}>Enhanced (keeps pen colors)</option><option value="color" ${S.scanFilter === 'color' ? 'selected' : ''}>Soft color</option><option value="gray" ${S.scanFilter === 'gray' ? 'selected' : ''}>Grayscale</option><option value="bw" ${S.scanFilter === 'bw' ? 'selected' : ''}>Black and white</option><option value="original" ${S.scanFilter === 'original' ? 'selected' : ''}>Original</option></select></div>
+      <div class="set-row"><div><b>Readability boost</b><small>Sharpens and upscales soft photos so the AI reads them better.</small></div>${seg('boostSeg', [['0', 'Off'], ['1', 'Auto'], ['2', 'Strong']], String(S.scanBoost ?? 1))}</div>
+      ${tog('cornerDetect', 'Find page edges automatically', 'AI crops and straightens each snap. Off = full photo, faster.', S.cornerDetect !== false)}
+      ${tog('autoRead', 'Read pages right after scanning', 'Off = pages are saved only; read them later with Re-read.', S.autoRead !== false)}
+      <div class="set-row"><div><b>Auto-sort into notebooks</b><small>After a page is read, WorkBook matches its subject to a notebook. <a href="#/inbox">Open the Inbox</a>.</small></div>${seg('sortSeg', [['ask', 'Ask me'], ['auto', 'Automatic'], ['off', 'Off']], S.autoSort || 'ask')}</div>
+    </section>
+    <section class="card set-sec" id="s-study"><h3>${icon('study')} Studying</h3>
+      <div class="set-row"><div><b>Review session size</b><small>How many due cards a Review session pulls at once.</small></div>${seg('reviewSeg', [['20', '20'], ['40', '40'], ['80', '80']], String(S.reviewLimit || 40))}</div>
+      <div class="set-row"><div><b>Default test setup</b><small>Pre-selected when you open the test maker.</small></div><select class="input sm" data-set="testPreset" style="width:auto"><option value="last" ${(S.testPreset || 'last') === 'last' ? 'selected' : ''}>Same as last time</option><option value="quick" ${S.testPreset === 'quick' ? 'selected' : ''}>Quick 10</option><option value="full" ${S.testPreset === 'full' ? 'selected' : ''}>Full test</option><option value="hard" ${S.testPreset === 'hard' ? 'selected' : ''}>Hard mode</option></select></div>
+      ${tog('speakAnswers', 'Read tutor answers aloud', 'The tutor and page chat speak their replies.', !!S.speakAnswers)}
+      <div class="set-row"><div><b>Voice speed</b><small id="rateLbl">${(S.speakRate || 1).toFixed(1)}×</small></div><input type="range" id="rate" min="0.7" max="1.5" step="0.1" value="${S.speakRate || 1}" style="width:180px"></div>
+      ${tog('showHints', 'Hints on by default', 'Practice tests start with hints available.', S.showHints !== false)}
+    </section>
+    <section class="card set-sec" id="s-plan"><h3>${icon('calendar')} Planner</h3>
+      <div class="set-row"><div><b>Week starts on</b></div>${seg('weekSeg', [['sun', 'Sunday'], ['mon', 'Monday']], S.weekStart || 'sun')}</div>
+      <div class="set-row"><div><b>Default item type</b><small>When you tap Add.</small></div><select class="input sm" data-set="defaultEventType" style="width:auto">${Object.entries(TYPES).filter(([k]) => k !== 'other').map(([k, v]) => `<option value="${k}" ${(S.defaultEventType || 'test') === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>
+      <div class="set-row"><div><b>Study plan minutes per day</b><small>Default when you build a plan.</small></div>${seg('ppdSeg', [['20', '20'], ['30', '30'], ['45', '45'], ['60', '60']], String(S.planMinutes || 30))}</div>
+      ${tog('confirmStudySet', 'Offer a study set after adding a test', '', S.confirmStudySet !== false)}
+    </section>
+    <section class="card set-sec" id="s-remind"><h3>${icon('bell')} Reminders</h3>
+      <p class="small muted" style="margin:0 0 10px">Pings this device: <b>3 days before</b> a test (4pm), <b>the day before</b> (6pm), <b>the morning of</b> (7am). Homework and projects: day before + day of. Flashcards: 4pm when 8+ are due.</p>
       <div id="pushBox">${st.enabled ? `<div class="ai-status" style="background:var(--green-soft);color:var(--green)">✅ Reminders are on for this device</div><div class="btn-row" style="margin-top:10px"><button class="btn sm" id="pushTest">Send a test notification</button><button class="btn sm danger" id="pushOff">Turn off</button></div>` : `<button class="btn primary" id="pushOn">${icon('bell')} Turn on reminders on this device</button>${isIOS() && !isStandalone() ? '<div class="small muted" style="margin-top:8px">📱 On iPhone/iPad: tap <b>Share → Add to Home Screen</b>, open WorkBook from there, then tap this button.</div>' : ''}${!pushSupported() && !isIOS() ? '<div class="small muted" style="margin-top:8px">This browser doesn’t support notifications.</div>' : ''}`}</div>
-      <div style="margin-top:12px" class="small"><b>Which reminders</b><div class="btn-row" style="margin-top:6px"><label class="chip"><input type="checkbox" class="rp" data-k="d3" ${prefs.d3 === false ? '' : 'checked'}> 3 days before</label><label class="chip"><input type="checkbox" class="rp" data-k="d1" ${prefs.d1 === false ? '' : 'checked'}> Day before</label><label class="chip"><input type="checkbox" class="rp" data-k="d0" ${prefs.d0 === false ? '' : 'checked'}> Morning of</label><label class="chip"><input type="checkbox" class="rp" data-k="review" ${prefs.review === false ? '' : 'checked'}> Flashcards due</label><label class="chip"><input type="checkbox" class="rp" data-k="weekly" ${prefs.weekly === false ? '' : 'checked'}> Weekly summary</label></div></div>
-      <div id="smsBox">${smsHtml}</div></div>
-    <div class="card"><h3>🗑 Trash <span class="muted small">(kept ${trash.days} days)</span></h3>${trash.items.length ? `<div id="trashList">${trash.items.map(t => `<div class="trash-row" data-id="${t.id}"><div class="rthumb" style="background-image:url('/api/pages/${t.pageId}/image?kind=thumb&r=${t.rev}')"></div><div><b><span class="nb-dot color-${esc(t.color)}"></span>${esc(t.title)}</b><span class="muted small">${t.kind === 'page' ? 'page from ' : ''}${esc(t.sub)} · deleted ${ago(t.deletedAt)}</span></div><button class="btn sm restore">${icon('restore')} Restore</button><button class="btn icon sm ghost purge" aria-label="Delete forever">${icon('x')}</button></div>`).join('')}</div><div class="btn-row" style="margin-top:10px"><button class="btn sm danger" id="emptyTrash">Empty trash</button></div>` : '<p class="muted small">Nothing in the trash. Deleted pages and notebooks land here for 30 days.</p>'}</div>
-    </div>
-    <div style="display:flex;flex-direction:column;gap:16px">
-    <div class="card"><h3>Profile</h3><div class="field"><label for="sName">Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label for="sUser">Username</label><input type="text" id="sUser" value="${esc(state.user.username)}" disabled></div><button class="btn primary" id="saveP">Save name</button></div>
-    <div class="card"><h3>${icon('lock')} Password</h3><div class="field"><label for="pwCur">Current password</label><input type="password" id="pwCur" autocomplete="current-password"></div><div class="row"><div class="field"><label for="pwNew">New password</label><input type="password" id="pwNew" autocomplete="new-password"></div><div class="field"><label for="pwNew2">Again</label><input type="password" id="pwNew2" autocomplete="new-password"></div></div><button class="btn" id="savePw">Change password</button><div class="help" style="margin-top:6px">Other devices get logged out.</div></div>
-    <div class="card"><h3>AI</h3><p class="small muted">Backend: <b>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')}</b> · Model: <b>${esc(state.ai?.model || '')}</b>${state.ai?.webSearch ? ' · live web search on' : ''}</p></div>
-    <div class="card"><h3>Account</h3><div class="btn-row"><button class="btn" id="shortcuts">${icon('key')} Keyboard shortcuts</button><button class="btn" id="logout">${icon('logout')} Log out</button></div></div>
+      <div style="margin-top:12px" class="small"><b>Which reminders</b><div class="btn-row" style="margin-top:6px"><label class="chip tchip"><input type="checkbox" class="rp" data-k="d3" ${prefs.d3 === false ? '' : 'checked'}> 3 days before</label><label class="chip tchip"><input type="checkbox" class="rp" data-k="d1" ${prefs.d1 === false ? '' : 'checked'}> Day before</label><label class="chip tchip"><input type="checkbox" class="rp" data-k="d0" ${prefs.d0 === false ? '' : 'checked'}> Morning of</label><label class="chip tchip"><input type="checkbox" class="rp" data-k="review" ${prefs.review === false ? '' : 'checked'}> Flashcards due</label><label class="chip tchip"><input type="checkbox" class="rp" data-k="weekly" ${prefs.weekly === false ? '' : 'checked'}> Weekly summary</label></div></div>
+      <div id="smsBox">${smsHtml}</div>
+    </section>
+    <section class="card set-sec" id="s-grades"><h3>${icon('grades')} Grades</h3>
+      <div class="set-row"><div><b>Letter scale for new classes</b></div>${seg('scaleSeg', [['plusminus', 'A− / B+'], ['standard', 'A B C D F']], S.gradeScale || 'plusminus')}</div>
+      <div class="set-row"><div><b>Target grade for new classes</b><small id="targetLbl">${S.gradeTarget || 90}%</small></div><input type="range" id="target" min="60" max="100" value="${S.gradeTarget || 90}" style="width:180px"></div>
+    </section>
+    <section class="card set-sec" id="s-data"><h3>${icon('shield')} Your data</h3>
+      <div class="set-row"><div><b>Export everything</b><small>One JSON file with notebooks, digital copies, planner, study sets and grades (no photos).</small></div><a class="btn sm" href="/api/export" download>${icon('download')} Download</a></div>
+      <div class="set-row"><div><b>Trash</b><small>Deleted pages and notebooks, kept ${trash.days} days.</small></div><span class="chip">${plural(trash.items.length, 'item')}</span></div>
+      ${trash.items.length ? `<div id="trashList">${trash.items.map(t => `<div class="trash-row" data-id="${t.id}"><div class="rthumb" style="background-image:url('/api/pages/${t.pageId}/image?kind=thumb&r=${t.rev}')"></div><div><b><span class="nb-dot color-${esc(t.color)}"></span>${esc(t.title)}</b><span class="muted small">${t.kind === 'page' ? 'page from ' : ''}${esc(t.sub)} · deleted ${ago(t.deletedAt)}</span></div><button class="btn sm restore">${icon('restore')} Restore</button><button class="btn icon sm ghost purge" aria-label="Delete forever">${icon('x')}</button></div>`).join('')}</div><div class="btn-row" style="margin-top:10px"><button class="btn sm danger" id="emptyTrash">Empty trash</button></div>` : ''}
+      <div class="set-row" style="margin-top:8px"><div><b style="color:var(--red)">Delete account</b><small>Removes everything for good.</small></div><button class="btn sm danger" id="delAcct">Delete…</button></div>
+    </section>
+    <section class="card set-sec" id="s-account"><h3>${icon('key')} Account</h3>
+      <div class="row"><div class="field"><label for="sName">Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label for="sUser">Username</label><input type="text" id="sUser" value="${esc(state.user.username)}" disabled></div></div><button class="btn" id="saveP">Save name</button>
+      <h3 style="margin-top:18px">${icon('lock')} Password</h3><div class="row"><div class="field"><label for="pwCur">Current</label><input type="password" id="pwCur" autocomplete="current-password"></div><div class="field"><label for="pwNew">New</label><input type="password" id="pwNew" autocomplete="new-password"></div><div class="field"><label for="pwNew2">Again</label><input type="password" id="pwNew2" autocomplete="new-password"></div></div><button class="btn" id="savePw">Change password</button><div class="help" style="margin-top:6px">Other devices get logged out.</div>
+      <div class="set-row" style="margin-top:16px"><div><b>AI</b><small>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')} · ${esc(state.ai?.model || '')}${state.ai?.webSearch ? ' · live web search on' : ''}</small></div></div>
+      <div class="btn-row" style="margin-top:10px"><button class="btn" id="shortcuts">${icon('key')} Keyboard shortcuts</button><button class="btn" id="logoutAll">${icon('logout')} Log out everywhere</button><button class="btn" id="logout">${icon('logout')} Log out</button></div>
+    </section>
     </div></div>`;
-  $$('#themeSeg button').forEach(b => b.onclick = () => { setTheme(b.dataset.t); $$('#themeSeg button').forEach(x => x.classList.toggle('active', x === b)); const tb = $('#themeBtn'); if (tb) tb.innerHTML = `${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}`; });
-  $('#saveP').onclick = async () => { const r = await api.patch('/me', { name: $('#sName').value }); state.user = r.user; shell.reset(); toast('Saved', 'ok'); settingsView(); };
+  // section nav (scroll on desktop, jump on phone)
+  $$('.settings-nav a').forEach(a => a.onclick = (e) => { e.preventDefault(); $$('.settings-nav a').forEach(x => x.classList.toggle('active', x === a)); $('#s-' + a.dataset.s)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); history.replaceState(null, '', '#/settings?s=' + a.dataset.s); });
+  if (q.s && q.s !== 'look') setTimeout(() => $('#s-' + q.s)?.scrollIntoView({ block: 'start' }), 50);
+  const segs = { themeSeg: (v) => { setTheme(v); const tb = $('#themeBtn'); if (tb) tb.innerHTML = `${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}`; }, sizeSeg: (v) => saveSettings({ fontSize: v }), boostSeg: (v) => saveSettings({ scanBoost: +v }), sortSeg: (v) => saveSettings({ autoSort: v }), reviewSeg: (v) => saveSettings({ reviewLimit: +v }), weekSeg: (v) => saveSettings({ weekStart: v }), ppdSeg: (v) => saveSettings({ planMinutes: +v }), scaleSeg: (v) => saveSettings({ gradeScale: v }) };
+  for (const [id, fn] of Object.entries(segs)) $$('#' + id + ' button').forEach(b => b.onclick = async () => { $$('#' + id + ' button').forEach(x => x.classList.toggle('active', x === b)); try { await fn(b.dataset.v); } catch (e) { toast(e.message, 'err'); } });
+  $$('[data-set]').forEach(el => el.onchange = async () => { try { await saveSettings({ [el.dataset.set]: el.type === 'checkbox' ? el.checked : el.value }); } catch (e) { toast(e.message, 'err'); } });
+  $$('.swatch[data-accent]').forEach(s => { const pick = async () => { $$('.swatch[data-accent]').forEach(x => x.classList.toggle('active', x === s)); await saveSettings({ accent: s.dataset.accent }); }; s.onclick = pick; s.onkeydown = (e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); pick(); } }; });
+  let rt; $('#rate').oninput = () => { $('#rateLbl').textContent = (+$('#rate').value).toFixed(1) + '×'; clearTimeout(rt); rt = setTimeout(() => saveSettings({ speakRate: +$('#rate').value }), 400); };
+  let tt; $('#target').oninput = () => { $('#targetLbl').textContent = $('#target').value + '%'; clearTimeout(tt); tt = setTimeout(() => saveSettings({ gradeTarget: +$('#target').value }), 400); };
+  $('#saveP').onclick = async () => { const r = await api.patch('/me', { name: $('#sName').value }); state.user = r.user; shell.reset(); toast('Saved', 'ok'); settingsView({}, { s: 'account' }); };
   $('#savePw').onclick = async () => { const a = $('#pwNew').value, b = $('#pwNew2').value; if (a !== b) return toast('The new passwords don’t match', 'err'); busy($('#savePw'), true, 'Changing…'); try { await api('/auth/password', { body: { current: $('#pwCur').value, password: a } }); toast('Password changed', 'ok'); $('#pwCur').value = $('#pwNew').value = $('#pwNew2').value = ''; } catch (e) { toast(e.message, 'err'); } busy($('#savePw'), false); };
   $('#logout').onclick = async () => { await api('/auth/logout', { body: {} }); state.user = null; invalidate(); localStorage.removeItem('dwb_last_user'); go('#/login'); };
+  $('#logoutAll').onclick = async () => { if (await confirm('Log out everywhere?', 'Every other phone or computer signed into this account gets logged out. This one stays.', { danger: false, ok: 'Log out others' })) { await api('/auth/logout-all', { body: {} }); toast('Other devices logged out', 'ok'); } };
   $('#shortcuts').onclick = () => import('./palette.js').then(m => m.shortcutsHelp());
-  const on = $('#pushOn'); if (on) on.onclick = async () => { busy(on, true, 'Turning on…'); try { await enablePush(); toast('Reminders on 🎉', 'ok'); settingsView(); } catch (e) { toast(e.message, 'err'); busy(on, false); } };
-  const off = $('#pushOff'); if (off) off.onclick = async () => { await disablePush(); toast('Reminders off'); settingsView(); };
+  $('#delAcct').onclick = () => { const m = modal(`<h2>Delete your account?</h2><p class="muted">Every notebook, page, study set, plan and grade is deleted for good. Type your password to confirm.</p><div class="field"><label for="delPw">Password</label><input type="password" id="delPw" autocomplete="current-password"></div><div class="actions"><button class="btn" data-close>Keep my account</button><button class="btn danger" id="delGo">Delete everything</button></div>`); $('#delGo', m.el).onclick = async () => { busy($('#delGo', m.el), true, 'Deleting…'); try { await api('/me', { method: 'DELETE', body: { password: $('#delPw', m.el).value } }); state.user = null; invalidate(); localStorage.removeItem('dwb_last_user'); m.close(); go('#/register'); toast('Account deleted'); } catch (e) { toast(e.message, 'err'); busy($('#delGo', m.el), false); } }; };
+  const on = $('#pushOn'); if (on) on.onclick = async () => { busy(on, true, 'Turning on…'); try { await enablePush(); toast('Reminders on 🎉', 'ok'); settingsView({}, { s: 'remind' }); } catch (e) { toast(e.message, 'err'); busy(on, false); } };
+  const off = $('#pushOff'); if (off) off.onclick = async () => { await disablePush(); toast('Reminders off'); settingsView({}, { s: 'remind' }); };
   const tp = $('#pushTest'); if (tp) tp.onclick = () => testPush();
-  (await import('./extras.js')).wireSms(() => settingsView());
-  $$('.rp').forEach(c => c.onchange = async () => { const rem = { ...(state.user.settings?.reminders || {}) }; rem[c.dataset.k] = c.checked; const r = await api.patch('/me', { settings: { reminders: rem } }); state.user = r.user; });
+  (await import('./extras.js')).wireSms(() => settingsView({}, { s: 'remind' }));
+  $$('.rp').forEach(c => c.onchange = async () => { const rem = { ...(settings().reminders || {}) }; rem[c.dataset.k] = c.checked; await saveSettings({ reminders: rem }); });
   $$('.trash-row').forEach(row => { $('.restore', row).onclick = async () => { try { const r = await api('/trash/' + row.dataset.id + '/restore', { body: {} }); invalidate(); toast('Restored', 'ok'); if (r.kind === 'page') go('#/page/' + r.pageId); else go('#/notebook/' + r.notebookId); } catch (e) { toast(e.message, 'err'); } }; $('.purge', row).onclick = async () => { if (await confirm('Delete forever?', 'This cannot be undone.')) { await api.del('/trash/' + row.dataset.id); row.remove(); } }; });
-  const et = $('#emptyTrash'); if (et) et.onclick = async () => { if (await confirm('Empty the trash?', 'Everything in it is deleted for good.', { ok: 'Empty trash' })) { await api.del('/trash'); settingsView(); } };
+  const et = $('#emptyTrash'); if (et) et.onclick = async () => { if (await confirm('Empty the trash?', 'Everything in it is deleted for good.', { ok: 'Empty trash' })) { await api.del('/trash'); settingsView({}, { s: 'data' }); } };
 }
 
 // ---------- routes (heavy screens are loaded on demand) ----------
@@ -621,6 +689,10 @@ route('/study/:id', lazy('./study.js', 'studyView'));
 route('/review', lazy('./review.js', 'reviewView'));
 route('/homework', lazy('./homework.js', 'homeworkView'));
 route('/homework/:id', lazy('./homework.js', 'homeworkReportView'));
+route('/friends', lazy('./friends.js', 'friendsView'));
+route('/week', lazy('./week.js', 'weekView'));
+route('/inbox', lazy('./inbox.js', 'inboxView'));
+route('/topics', lazy('./topics.js', 'topicsView'));
 route('/grades', lazy('./grades.js', 'gradesView'));
 route('/settings', settingsView);
 route('/progress', lazy('./extras.js', 'progressView'));
@@ -633,6 +705,7 @@ async function checkVersion() {
 }
 async function boot() {
   try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; BUILD = r.v || null; } catch {}
+  applySettings();
   registerSW();
   setInterval(checkVersion, 5 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
