@@ -81,9 +81,13 @@ mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padd
 .brand .name small { display: block; font-family: var(--font); font-weight: 500; font-size: 11px; color: var(--ink-3); letter-spacing: .01em; margin-top: 2px; }
 .nav { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; scrollbar-width: none; margin: 0 -4px; padding: 0 4px; flex: 1 1 auto; min-height: 0; }
 .nav::-webkit-scrollbar { display: none; }
-.nav-group { display: flex; flex-direction: column; gap: 1px; margin-bottom: 6px; }
-.nav-g { font-size: 11px; font-weight: 700; color: var(--ink-3); padding: 3px 14px 2px; letter-spacing: .02em; }
-.nav a { padding-top: 7px; padding-bottom: 7px; }
+.nav-group { display: flex; flex-direction: column; gap: 0; margin-bottom: 4px; }
+.nav-g { font-size: 11px; font-weight: 700; color: var(--ink-3); padding: 4px 14px 1px; letter-spacing: .02em; }
+.nav a { padding-top: 6px; padding-bottom: 6px; }
+.nav-tools { display: flex; gap: 4px; margin-top: 2px; }
+.nav-tools .nav-btn { padding: 7px 10px; font-size: 13.5px; gap: 8px; }
+.nav-tools .nav-btn:first-child { flex: 1.4; } .nav-tools .kbd-hint { margin-left: 2px; }
+.brand { padding-bottom: 12px; }
 .sidebar .spacer { flex: 0 0 4px; }
 #view { animation: pagein .22s ease; }
 @keyframes pagein { from { opacity: 0; transform: translateY(4px) } }

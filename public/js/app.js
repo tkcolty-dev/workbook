@@ -23,8 +23,7 @@ export function shell(active, content) {
       <aside class="sidebar" aria-label="Main navigation">
         <a class="brand" href="#/" style="text-decoration:none;color:inherit">${logoSvg(36)}<div class="name">WorkBook<small>your notebook, digital</small></div></a>
         <nav class="nav">${NAV_GROUPS.map(g => `<div class="nav-group"><div class="nav-g">${g.g}</div>${g.items.map(([href, ic, label, col]) => `<a href="${href}" data-nav="${label}" style="--tab:${TAB_COLORS[col]}">${icon(ic)}${label}${BADGES[label] ? `<span class="badge hidden" id="${BADGES[label]}"></span>` : ''}</a>`).join('')}</div>`).join('')}</nav>
-        <button class="nav-btn" id="searchBtn" type="button">${icon('search')} Search <kbd class="kbd-hint">⌘K</kbd></button>
-        <button class="nav-btn" id="focusBtn" type="button" title="Focus timer (25/5)">${icon('clock')} Focus timer</button>
+        <div class="nav-tools"><button class="nav-btn" id="searchBtn" type="button">${icon('search')} Search <kbd class="kbd-hint">⌘K</kbd></button><button class="nav-btn" id="focusBtn" type="button" title="Focus timer (25/5)" aria-label="Focus timer">${icon('clock')} Focus</button></div>
         <div class="spacer"></div>
         <div class="side-foot"><button class="btn sm ghost" id="themeBtn" type="button" title="Theme">${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}</button><button class="btn sm ghost version" id="verBtn" type="button" title="What's new">v${esc(state.version || '')}</button><a class="btn sm ghost" href="#/settings?s=account" aria-label="Settings">${icon('settings')}</a></div>
         <a class="nav-a" href="#/settings" style="text-decoration:none;color:inherit"><div class="userbox"><div class="avatar" aria-hidden="true">${esc(initials)}</div><div class="who"><b>${esc(u?.name || u?.username)}</b><span title="${esc(state.ai?.model || '')}">${esc(aiLabel())}</span></div></div></a>
