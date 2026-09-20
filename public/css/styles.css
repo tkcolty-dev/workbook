@@ -902,6 +902,15 @@ kbd { font-family: inherit; font-size: 11px; background: var(--line-2); border: 
 .inbox-row { flex-wrap: wrap; cursor: default; } .inbox-row .pinfo { flex: 1 1 240px; } .inbox-acts { flex-basis: 100%; justify-content: flex-end; }
 @media (min-width: 900px) { .inbox-acts { flex-basis: auto; } }
 
+/* version + what's new */
+.btn.version { font-family: var(--display); font-weight: 650; color: var(--ink-3); padding-left: 8px; padding-right: 8px; }
+.changelog { display: flex; flex-direction: column; gap: 6px; max-height: 56vh; overflow: auto; }
+.changelog details { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; }
+.changelog summary { cursor: pointer; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 14px; list-style: none; }
+.changelog summary::-webkit-details-marker { display: none; }
+.changelog summary b { font-family: var(--display); color: var(--accent); } .changelog summary .muted { margin-left: auto; }
+.changelog ul { margin: 8px 0 2px; padding-left: 18px; font-size: 14px; line-height: 1.5; } .changelog li { margin: 3px 0; }
+
 /* trash */
 .trash-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line-2); font-size: 14px; }
 .trash-row .rthumb { width: 36px; height: 46px; border-radius: 5px; background: var(--line-2) center/cover; border: 1px solid var(--line); flex-shrink: 0; }

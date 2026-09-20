@@ -1,0 +1,45 @@
+[
+  {
+    "version": "2.4.0",
+    "date": "2026-09-20",
+    "title": "Version number, update button and this log",
+    "items": [
+      "The app shows its version in the sidebar and in Settings → Account.",
+      "“Check for updates” pulls the newest version right away instead of waiting for the next check.",
+      "After each update, a “What's new” note opens once and then stays out of your way."
+    ]
+  },
+  {
+    "version": "2.3.0",
+    "date": "2026-09-20",
+    "title": "Friends, Week, Inbox, Topics and account-wide settings",
+    "items": [
+      "Friends: share a study set, friends take your tests, their scores show on a scoreboard, and you see who to beat.",
+      "Week: seven days side by side with due work and plan tasks, a load meter per day, and a one-tap rebalance.",
+      "Inbox: pages that look like they belong in another notebook get a suggestion. Ask, automatic, or off.",
+      "Topics: a map of every topic across notebooks, plus related pages on every page.",
+      "Settings are saved to your account and follow you to every device: theme, accent color, text size, scanning defaults, study defaults, planner defaults, grades defaults, export and account tools.",
+      "Auto theme follows the device properly, and “Dark at night” switches after 7pm.",
+      "Grouped navigation with badges, and a “More” sheet on phones."
+    ]
+  },
+  {
+    "version": "2.2.0",
+    "date": "2026-09-19",
+    "title": "Homework page and a better test maker",
+    "items": [
+      "Homework is its own section with a full-page report for every check, built for phones.",
+      "The test maker has one-tap presets, four short sections, a live summary, and remembers your last setup."
+    ]
+  },
+  {
+    "version": "2.1.0",
+    "date": "2026-09-19",
+    "title": "Faster, redesigned, and a lot more to do",
+    "items": [
+      "Scanning runs in the background thread and uploads raw images, so the camera never freezes.",
+      "New look: graph paper, ballpoint blue, one highlighter accent, and dark mode.",
+      "Daily flashcard review, AI study plans, a grades tracker, a 30-day trash with undo, page tools (explain, summary, questions, translate, read aloud, ask), vocab flashcards, planner steps, a command palette (⌘K), paste/drop/PDF scanning, exports, and more."
+    ]
+  }
+]

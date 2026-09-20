@@ -90,7 +90,7 @@ const auth = (req, res, next) => req.user ? next() : res.status(401).json({ erro
 app.set('trust proxy', 1);
 const setSession = (res, token, remember = true) => res.setHeader('Set-Cookie', cookieStr(token, res.req, remember));
 
-app.get('/api/me', (req, res) => res.json({ v: BUILD_ID, user: req.user ? store.users.public(req.user) : null, ai: { mode: ai.BACKEND, model: ai.modelLabel(), available: ai.AVAILABLE, webSearch: ai.HAS_WEB_SEARCH }, storage: store.backendName() }));
+app.get('/api/me', (req, res) => res.json({ v: BUILD_ID, version: VERSION, changelog: CHANGELOG.slice(0, 8), user: req.user ? store.users.public(req.user) : null, ai: { mode: ai.BACKEND, model: ai.modelLabel(), available: ai.AVAILABLE, webSearch: ai.HAS_WEB_SEARCH }, storage: store.backendName() }));
 
 app.post('/api/auth/register', (req, res) => {
   const { username, password, name } = req.body || {};
@@ -1415,7 +1415,9 @@ app.put('/api/grades', auth, (req, res) => {
 app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 const BUILD_ID = String(Date.now());
-app.get('/api/version', (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json({ v: BUILD_ID }); });
+const VERSION = require('./package.json').version;
+let CHANGELOG = []; try { CHANGELOG = JSON.parse(fs.readFileSync(path.join(__dirname, 'CHANGELOG.json'), 'utf8')); } catch (e) { console.error('changelog:', e.message); }
+app.get('/api/version', (req, res) => { res.setHeader('Cache-Control', 'no-store'); res.json({ v: BUILD_ID, version: VERSION, changelog: CHANGELOG.slice(0, 8) }); });
 app.get('/api/health', (req, res) => res.json({ ok: true, storage: store.backendName(), ai: ai.AVAILABLE ? ai.BACKEND + ': ' + ai.modelLabel() : 'unconfigured' }));
 
 const PORT = process.env.PORT || 4980;

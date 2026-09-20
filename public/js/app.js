@@ -26,7 +26,7 @@ export function shell(active, content) {
         <button class="nav-btn" id="searchBtn" type="button">${icon('search')} Search <kbd class="kbd-hint">⌘K</kbd></button>
         <button class="nav-btn" id="focusBtn" type="button" title="Focus timer (25/5)">${icon('clock')} Focus timer</button>
         <div class="spacer"></div>
-        <div class="side-foot"><button class="btn sm ghost" id="themeBtn" type="button" title="Theme">${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}</button><a class="btn sm ghost" href="#/settings" aria-label="Settings">${icon('settings')}</a></div>
+        <div class="side-foot"><button class="btn sm ghost" id="themeBtn" type="button" title="Theme">${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}</button><button class="btn sm ghost version" id="verBtn" type="button" title="What's new">v${esc(state.version || '')}</button><a class="btn sm ghost" href="#/settings?s=account" aria-label="Settings">${icon('settings')}</a></div>
         <a class="nav-a" href="#/settings" style="text-decoration:none;color:inherit"><div class="userbox"><div class="avatar" aria-hidden="true">${esc(initials)}</div><div class="who"><b>${esc(u?.name || u?.username)}</b><span title="${esc(state.ai?.model || '')}">${esc(aiLabel())}</span></div></div></a>
       </aside>
       <main class="main">
@@ -41,7 +41,8 @@ export function shell(active, content) {
     const openSearch = () => import('./palette.js').then(m => m.openPalette());
     $('#searchBtn').onclick = openSearch; $('#searchBtnM').onclick = openSearch;
     $('#focusBtn').onclick = () => import('./extras.js').then(m => m.toggleFocusTimer());
-    $('#themeBtn').onclick = () => { const next = { auto: 'light', light: 'dark', dark: 'auto' }[getTheme()]; setTheme(next); $('#themeBtn').innerHTML = `${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}`; };
+    $('#themeBtn').onclick = () => { const next = { auto: 'light', light: 'dark', dark: 'schedule', schedule: 'auto' }[getTheme()] || 'auto'; setTheme(next); $('#themeBtn').innerHTML = `${icon(isDark() ? 'sun' : 'moon')} ${themeLabel()}`; };
+    $('#verBtn').onclick = () => whatsNew(true);
     try { const ft = JSON.parse(localStorage.getItem('dwb_focus') || 'null'); if (ft?.running) import('./extras.js').then(m => m.mountFocusTimer()); } catch {}
   }
   $$('[data-nav]', root).forEach(a => a.classList.toggle('active', a.dataset.nav === active || (a.dataset.nav === 'More' && !['Home', 'Notebooks', 'Scan', 'Study'].includes(active))));
@@ -53,6 +54,23 @@ shell.reset = () => { const s = $('.shell'); if (s) s.dataset.uid = 'stale'; };
 const themeLabel = () => ({ auto: 'Auto theme', light: 'Light', dark: 'Dark', schedule: 'Dark at night' })[getTheme()] || 'Auto theme';
 const setBadge = (id, v) => { const b = $('#' + id); if (!b) return; b.textContent = v > 99 ? '99+' : v; b.classList.toggle('hidden', !v); };
 export function updateReviewBadge(n) { if (typeof n === 'number') state.reviewDue = n; setBadge('reviewBadge', state.reviewDue || 0); setBadge('inboxBadge', state.inboxN || 0); setBadge('moreBadge', (state.reviewDue || 0) + (state.inboxN || 0)); }
+// "What's new": the update log. Opens by itself once per version (remembered on the account), or any time from the version button.
+export function whatsNew(manual = false) {
+  const log = state.changelog || []; const v = state.version || '';
+  const m = modal(`<h2>What's new</h2><p class="muted small" style="margin:-6px 0 12px">WorkBook v${esc(v)}${manual ? '' : ' · you just got this update'}</p>
+    <div class="changelog">${log.map((e, i) => `<details ${i === 0 ? 'open' : ''}><summary><b>v${esc(e.version)}</b> ${esc(e.title)}<span class="muted small">${esc(e.date)}</span></summary><ul>${e.items.map(x => `<li>${esc(x)}</li>`).join('')}</ul></details>`).join('') || '<p class="muted">No notes yet.</p>'}</div>
+    <div class="actions"><button class="btn" id="chkUpd">${icon('refresh')} Check for updates</button><button class="btn primary" data-close>Got it</button></div>`, { onClose: () => { try { localStorage.setItem('dwb_seen_version', v); } catch {} if (state.user && settings().seenVersion !== v) saveSettings({ seenVersion: v }).catch(() => {}); } });
+  $('#chkUpd', m.el).onclick = () => checkForUpdates($('#chkUpd', m.el));
+}
+export async function checkForUpdates(btn) {
+  if (btn) busy(btn, true, 'Checking…');
+  try {
+    const r = await fetch('/api/version', { cache: 'no-store' }).then(r => r.json());
+    if (BUILD && r.v !== BUILD) { toast(`Updating to v${r.version}…`, 'ok'); setTimeout(() => location.reload(), 500); return; }
+    toast(`You're on the newest version (v${r.version})`, 'ok');
+  } catch (e) { toast('Could not reach the server', 'err'); }
+  if (btn) busy(btn, false);
+}
 // phone: the "More" tab opens every section as a grid
 function moreSheet() {
   const m = modal(`<h2>Everything</h2><div class="more-grid">${NAV_GROUPS.flatMap(g => g.items).map(([href, ic, label, col]) => `<a href="${href}" class="more-item" style="--tab:${TAB_COLORS[col]}">${icon(ic)}<span>${label}</span>${label === 'Review' && state.reviewDue ? `<b class="badge">${state.reviewDue}</b>` : label === 'Inbox' && state.inboxN ? `<b class="badge">${state.inboxN}</b>` : ''}</a>`).join('')}<a href="#/settings" class="more-item" style="--tab:#5b6272">${icon('settings')}<span>Settings</span></a><button type="button" class="more-item" id="moreSearch" style="--tab:#5b6272">${icon('search')}<span>Search</span></button></div>`);
@@ -646,6 +664,7 @@ async function settingsView(_, q = {}) {
       <div class="row"><div class="field"><label for="sName">Name</label><input type="text" id="sName" value="${esc(state.user.name || '')}"></div><div class="field"><label for="sUser">Username</label><input type="text" id="sUser" value="${esc(state.user.username)}" disabled></div></div><button class="btn" id="saveP">Save name</button>
       <h3 style="margin-top:18px">${icon('lock')} Password</h3><div class="row"><div class="field"><label for="pwCur">Current</label><input type="password" id="pwCur" autocomplete="current-password"></div><div class="field"><label for="pwNew">New</label><input type="password" id="pwNew" autocomplete="new-password"></div><div class="field"><label for="pwNew2">Again</label><input type="password" id="pwNew2" autocomplete="new-password"></div></div><button class="btn" id="savePw">Change password</button><div class="help" style="margin-top:6px">Other devices get logged out.</div>
       <div class="set-row" style="margin-top:16px"><div><b>AI</b><small>${esc({ anthropic: 'Anthropic API (Claude)', openai: 'Tanzu GenAI (platform models)', cli: 'local Claude Code CLI', none: 'not configured' }[state.ai?.mode] || state.ai?.mode || '')} · ${esc(state.ai?.model || '')}${state.ai?.webSearch ? ' · live web search on' : ''}</small></div></div>
+      <div class="set-row" style="margin-top:10px"><div><b>Version ${esc(state.version || '')}</b><small>Updates install on their own when you open the app. Check now to pull one right away.</small></div><div class="btn-row"><button class="btn sm" id="whatsNew">${icon('sparkle')} What's new</button><button class="btn sm primary" id="checkUpd">${icon('refresh')} Check for updates</button></div></div>
       <div class="btn-row" style="margin-top:10px"><button class="btn" id="shortcuts">${icon('key')} Keyboard shortcuts</button><button class="btn" id="logoutAll">${icon('logout')} Log out everywhere</button><button class="btn" id="logout">${icon('logout')} Log out</button></div>
     </section>
     </div></div>`;
@@ -663,6 +682,8 @@ async function settingsView(_, q = {}) {
   $('#logout').onclick = async () => { await api('/auth/logout', { body: {} }); state.user = null; invalidate(); localStorage.removeItem('dwb_last_user'); go('#/login'); };
   $('#logoutAll').onclick = async () => { if (await confirm('Log out everywhere?', 'Every other phone or computer signed into this account gets logged out. This one stays.', { danger: false, ok: 'Log out others' })) { await api('/auth/logout-all', { body: {} }); toast('Other devices logged out', 'ok'); } };
   $('#shortcuts').onclick = () => import('./palette.js').then(m => m.shortcutsHelp());
+  $('#whatsNew').onclick = () => whatsNew(true);
+  $('#checkUpd').onclick = () => checkForUpdates($('#checkUpd'));
   $('#delAcct').onclick = () => { const m = modal(`<h2>Delete your account?</h2><p class="muted">Every notebook, page, study set, plan and grade is deleted for good. Type your password to confirm.</p><div class="field"><label for="delPw">Password</label><input type="password" id="delPw" autocomplete="current-password"></div><div class="actions"><button class="btn" data-close>Keep my account</button><button class="btn danger" id="delGo">Delete everything</button></div>`); $('#delGo', m.el).onclick = async () => { busy($('#delGo', m.el), true, 'Deleting…'); try { await api('/me', { method: 'DELETE', body: { password: $('#delPw', m.el).value } }); state.user = null; invalidate(); localStorage.removeItem('dwb_last_user'); m.close(); go('#/register'); toast('Account deleted'); } catch (e) { toast(e.message, 'err'); busy($('#delGo', m.el), false); } }; };
   const on = $('#pushOn'); if (on) on.onclick = async () => { busy(on, true, 'Turning on…'); try { await enablePush(); toast('Reminders on 🎉', 'ok'); settingsView({}, { s: 'remind' }); } catch (e) { toast(e.message, 'err'); busy(on, false); } };
   const off = $('#pushOff'); if (off) off.onclick = async () => { await disablePush(); toast('Reminders off'); settingsView({}, { s: 'remind' }); };
@@ -701,12 +722,20 @@ route('/s/:token', lazy('./extras.js', 'sharedView'));
 // auto-update: when a new version is deployed, reload on the next navigation (never mid-scan)
 let BUILD = null;
 async function checkVersion() {
-  try { const r = await fetch('/api/version', { cache: 'no-store' }).then(r => r.json()); if (BUILD && r.v !== BUILD) { const busyScan = location.hash.startsWith('#/scan') && document.querySelector('.tray-item:not(.ready):not(.error)'); if (!busyScan) { toast('Updating to the newest WorkBook…'); setTimeout(() => location.reload(), 600); } } else if (!BUILD) BUILD = r.v; } catch {}
+  try { const r = await fetch('/api/version', { cache: 'no-store' }).then(r => r.json()); if (BUILD && r.v !== BUILD) { const busyScan = location.hash.startsWith('#/scan') && document.querySelector('.tray-item:not(.ready):not(.error)'); if (!busyScan) { toast(`Updating to WorkBook v${r.version}…`); setTimeout(() => location.reload(), 600); } else toast(`WorkBook v${r.version} is ready`, '', { action: { label: 'Update now', fn: () => location.reload() }, ms: 15000 }); } else if (!BUILD) BUILD = r.v; } catch {}
 }
 async function boot() {
-  try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; BUILD = r.v || null; } catch {}
+  try { const r = await api('/me'); state.user = r.user; state.ai = r.ai; state.version = r.version; state.changelog = r.changelog; BUILD = r.v || null; } catch {}
   applySettings();
   registerSW();
+  // show the update log once per version; a brand-new account just gets marked as current
+  if (state.user && state.version) {
+    let seenLocal = ''; try { seenLocal = localStorage.getItem('dwb_seen_version') || ''; } catch {}
+    const seen = settings().seenVersion || seenLocal;
+    const brandNew = Date.now() - (state.user.createdAt || 0) < 10 * 60000;
+    if (!seen && brandNew) { try { localStorage.setItem('dwb_seen_version', state.version); } catch {} saveSettings({ seenVersion: state.version }).catch(() => {}); }
+    else if (seen !== state.version) setTimeout(() => whatsNew(false), 900);
+  }
   setInterval(checkVersion, 5 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
   const guard = async () => {
