@@ -91,7 +91,9 @@ mark { background: var(--mark); color: var(--mark-ink); border-radius: 3px; padd
 .sidebar { padding: 14px 12px 10px; gap: 3px; }
 .brand { padding: 2px 8px 10px; }
 .userbox { padding: 6px 10px; }
-@media (max-height: 640px) { .nav a { padding-top: 4px; padding-bottom: 4px; } .brand .name small { display: none; } }
+.nav a, .nav-btn { line-height: 1.3; }
+@media (max-height: 800px) { .sidebar .nav-a { display: none; } .brand .name small { display: none; } .brand { padding-bottom: 6px; } }
+@media (max-height: 640px) { .nav a { padding-top: 3px; padding-bottom: 3px; } .nav-g { display: none; } }
 .sidebar .spacer { flex: 0 0 4px; }
 #view { animation: pagein .22s ease; }
 @keyframes pagein { from { opacity: 0; transform: translateY(4px) } }
