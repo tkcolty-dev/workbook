@@ -21,7 +21,7 @@ export async function openPalette(initial = '') {
     { g: 'Actions', t: 'Focus timer', s: 'clock', run: () => import('./extras.js').then(x => x.toggleFocusTimer()), k: 'pomodoro timer focus' },
     { g: 'Actions', t: 'Keyboard shortcuts', s: 'key', run: () => shortcutsHelp(), k: 'help keys' },
     { g: 'Go to', t: 'Home', s: 'home', run: () => go('#/') }, { g: 'Go to', t: 'Notebooks', s: 'book', run: () => go('#/notebooks') }, { g: 'Go to', t: 'Planner', s: 'calendar', run: () => go('#/planner') },
-    { g: 'Go to', t: 'Study', s: 'study', run: () => go('#/study') }, { g: 'Go to', t: 'Review', s: 'review', run: () => go('#/review') }, { g: 'Go to', t: 'Grades', s: 'grades', run: () => go('#/grades') },
+    { g: 'Go to', t: 'Study', s: 'study', run: () => go('#/study') }, { g: 'Go to', t: 'Homework', s: 'check', run: () => go('#/homework') }, { g: 'Go to', t: 'Review', s: 'review', run: () => go('#/review') }, { g: 'Go to', t: 'Grades', s: 'grades', run: () => go('#/grades') },
     { g: 'Go to', t: 'Progress', s: 'zap', run: () => go('#/progress') }, { g: 'Go to', t: 'Settings', s: 'settings', run: () => go('#/settings') },
     ...nbs.map(n => ({ g: 'Notebooks', t: n.name, sub: `${n.subject || ''} · ${plural(n.scanned || 0, 'page')}`, s: 'book', run: () => go('#/notebook/' + n.id), k: n.subject || '' })),
     ...sets.map(s => ({ g: 'Study sets', t: s.title, sub: `${s.subject || ''}${s.cardCount ? ' · ' + s.cardCount + ' cards' : ''}${s.testCount ? ' · ' + s.testCount + ' tests' : ''}`, s: 'study', run: () => go('#/study/' + s.id), k: s.subject || '' })),

@@ -615,6 +615,17 @@ Return ONLY JSON: {"items":[{"n":"1a","verdict":"correct|partial|wrong|blank","c
   } catch (e) { console.error('check:', e.message); res.status(500).json({ error: e.message }); }
 });
 
+// every checked homework page, newest first, plus simple stats (for the Homework hub)
+app.get('/api/homework', auth, (req, res) => {
+  const d = store.db(req.user.id);
+  const items = d.pages.filter(p => p.homework).map(p => { const nb = store.findNb(d, p.notebookId); return { pageId: p.id, index: p.index, title: p.title || 'Page ' + p.index, notebookId: p.notebookId, notebook: nb?.name || '', subject: nb?.subject || '', color: nb?.color || 'navy', rev: p.rev || 0, assignment: p.homework.assignment || '', percent: p.homework.score.percent, score: p.homework.score, n: p.homework.items.length, checkedAt: p.homework.checkedAt, tips: (p.homework.tips || []).slice(0, 2) }; }).sort((a, b) => b.checkedAt - a.checkedAt);
+  const avg = items.length ? Math.round(items.reduce((n, i) => n + i.percent, 0) / items.length) : null;
+  const recent = items.slice(0, 5); const recentAvg = recent.length ? Math.round(recent.reduce((n, i) => n + i.percent, 0) / recent.length) : null;
+  const bySubject = {}; for (const i of items) { const k = i.subject || i.notebook || 'Other'; bySubject[k] ||= { n: 0, sum: 0 }; bySubject[k].n++; bySubject[k].sum += i.percent; }
+  const weak = {}; for (const p of d.pages) for (const it of p.homework?.items || []) if (it.verdict === 'wrong' || it.verdict === 'partial') { const k = String(it.problem || '').slice(0, 60); weak[k] = (weak[k] || 0) + 1; }
+  res.json({ items, avg, recentAvg, total: items.length, problems: items.reduce((n, i) => n + i.n, 0), bySubject: Object.entries(bySubject).map(([k, v]) => ({ subject: k, n: v.n, avg: Math.round(v.sum / v.n) })).sort((a, b) => a.avg - b.avg) });
+});
+
 // ---------- graded test → "fix what I missed" study set ----------
 app.post('/api/pages/:id/graded', auth, async (req, res) => {
   const d = store.db(req.user.id);

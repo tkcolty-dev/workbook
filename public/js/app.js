@@ -7,9 +7,9 @@ const lazy = (mod, fn) => async (...a) => (await import(mod))[fn](...a);
 // ---------- shell (rendered once; navigation only swaps the page body) ----------
 const NAV = [
   ['#/', 'home', 'Home', 'navy'], ['#/notebooks', 'book', 'Notebooks', 'purple'], ['#/scan', 'camera', 'Scan', 'green'], ['#/planner', 'calendar', 'Planner', 'orange'],
-  ['#/study', 'study', 'Study', 'pink'], ['#/review', 'review', 'Review', 'yellow'], ['#/grades', 'grades', 'Grades', 'teal'], ['#/progress', 'zap', 'Progress', 'red'],
+  ['#/study', 'study', 'Study', 'pink'], ['#/homework', 'check', 'Homework', 'red'], ['#/review', 'review', 'Review', 'yellow'], ['#/grades', 'grades', 'Grades', 'teal'], ['#/progress', 'zap', 'Progress', 'black'],
 ];
-const TAB_COLORS = { navy: '#1f4fd8', purple: '#8253e0', green: '#22a06b', orange: '#f27d3a', pink: '#e85d9a', yellow: '#e0b000', teal: '#1aa5a5', red: '#e2574a' };
+const TAB_COLORS = { navy: '#1f4fd8', purple: '#8253e0', green: '#22a06b', orange: '#f27d3a', pink: '#e85d9a', yellow: '#e0b000', teal: '#1aa5a5', red: '#e2574a', black: '#5b6272' };
 const aiLabel = () => state.ai?.available === false ? '⚠️ AI not set up' : state.ai?.mode === 'cli' ? 'AI: Claude (local)' : state.ai?.mode === 'anthropic' ? 'AI: Claude' : 'AI: ' + (state.ai?.model || '').split(' + ')[0];
 export function shell(active, content) {
   const u = state.user;
@@ -27,7 +27,7 @@ export function shell(active, content) {
         <a class="nav-a" href="#/settings" style="text-decoration:none;color:inherit"><div class="userbox"><div class="avatar" aria-hidden="true">${esc(initials)}</div><div class="who"><b>${esc(u?.name || u?.username)}</b><span title="${esc(state.ai?.model || '')}">${esc(aiLabel())}</span></div></div></a>
       </aside>
       <main class="main">
-        <div class="topbar"><a class="brand" href="#/" style="text-decoration:none;color:inherit">${logoSvg(30)}<div class="name">WorkBook</div></a><div class="btn-row"><button class="btn icon sm ghost" id="searchBtnM" type="button" aria-label="Search">${icon('search')}</button><a class="btn icon sm ghost" href="#/review" aria-label="Review flashcards">${icon('review')}</a><a class="btn icon sm ghost" href="#/grades" aria-label="Grades">${icon('grades')}</a><a class="btn icon sm ghost" href="#/settings" aria-label="Settings">${icon('settings')}</a></div></div>
+        <div class="topbar"><a class="brand" href="#/" style="text-decoration:none;color:inherit">${logoSvg(30)}<div class="name">WorkBook</div></a><div class="btn-row"><button class="btn icon sm ghost" id="searchBtnM" type="button" aria-label="Search">${icon('search')}</button><a class="btn icon sm ghost" href="#/homework" aria-label="Homework">${icon('check')}</a><a class="btn icon sm ghost" href="#/review" aria-label="Review flashcards">${icon('review')}</a><a class="btn icon sm ghost" href="#/grades" aria-label="Grades">${icon('grades')}</a><a class="btn icon sm ghost" href="#/settings" aria-label="Settings">${icon('settings')}</a></div></div>
         ${state.ai?.available === false ? `<div class="ai-status warn" style="margin-bottom:14px">⚠️ AI features are switched off on this server (no API key). Scanning, notebooks, planner and grades work; AI reading, study sheets, tests and flashcards will be enabled once a key is added.</div>` : ''}
         <div id="view"></div>
       </main>
@@ -393,6 +393,7 @@ async function pageView({ id }, q = {}) {
   $$('.dismissSug').forEach(b => b.onclick = async () => { sugs[+b.dataset.k].done = true; await api.patch('/pages/' + page.id, { suggestions: page.suggestions }); dispatch(); });
   setKeys((e) => { if (e.target.closest('input,textarea,[contenteditable]')) return; if (e.key === 'ArrowLeft' && prev) go('#/page/' + prev.id); if (e.key === 'ArrowRight' && next) go('#/page/' + next.id); if (e.key === 'e') $('#mEdit').click(); });
   if (q.tool) runTool(q.tool);
+  if (q.ask) { askAboutPage(page, $('#toolOut')); $('#toolOut').scrollIntoView({ block: 'center' }); }
 }
 // per-page tutor chat (streams)
 function askAboutPage(page, out) {
@@ -438,9 +439,10 @@ export function homeworkHtml(hw) {
     ${hw.summary ? `<p style="margin:8px 0 4px">${esc(hw.summary)}</p>` : ''}
     <details class="hw-details" ${hw.items.some(i => i.verdict !== 'correct') ? 'open' : ''}><summary class="small" style="cursor:pointer;margin-top:8px">${hw.items.some(i => i.verdict !== 'correct') ? 'Problems and fixes' : 'Show all ' + hw.items.length + ' problems'}</summary><div class="hw-items">${hw.items.map(it => `<div class="hw-item ${it.verdict}"><div class="hw-n">${esc(it.n)}</div><div class="hw-body"><div class="hw-q">${mdi(it.problem)}</div><div class="small"><span class="muted">You wrote:</span> <b>${it.studentAnswer ? mdi(it.studentAnswer) : '<i class="muted">nothing</i>'}</b> <span class="chip ${v[it.verdict][1]}">${v[it.verdict][0]} ${v[it.verdict][2]}</span></div>${it.verdict !== 'correct' ? `<div class="hw-fix"><b>Correct answer:</b> ${mdi(it.correctAnswer)}${it.explanation ? `<div style="margin-top:3px">${mdi(it.explanation)}</div>` : ''}</div>` : ''}</div></div>`).join('')}</div></details>
     ${hw.tips?.length ? `<div class="hw-tips"><b>What to practice</b><ul>${hw.tips.map(t => `<li>${mdi(t)}</li>`).join('')}</ul></div>` : ''}
-    <div class="btn-row" style="margin-top:10px"><button class="btn sm" id="recheck">${icon('refresh')} Check again</button><button class="btn sm primary" id="practiceSimilar">${icon('quiz')} Practice similar problems</button></div></div>`;
+    <div class="btn-row" style="margin-top:10px"><a class="btn sm primary" href="#/homework/${hw.pageId || ''}" id="openReport">${icon('check')} Full report</a><button class="btn sm" id="practiceSimilar">${icon('quiz')} Practice similar problems</button><button class="btn sm ghost" id="recheck">${icon('refresh')} Check again</button></div></div>`;
 }
 export function wireHomework(page, nb) {
+  const or = $('#openReport'); if (or) or.href = '#/homework/' + page.id;
   const rc = $('#recheck'); if (rc) rc.onclick = () => checkHomework(page, nb);
   const ps = $('#practiceSimilar'); if (ps) ps.onclick = () => import('./study.js').then(m => m.testOnPage(page, nb));
 }
@@ -453,8 +455,7 @@ export async function checkHomework(page, nb) {
     try {
       const hw = await api('/pages/' + page.id + '/check', { body: { hint: $('#hwHint', m.el).value.trim() } });
       page.homework = hw; m.close();
-      const box = $('#hwBox'); if (box) { box.innerHTML = homeworkHtml(hw); wireHomework(page, nb); box.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-      else go('#/page/' + page.id);
+      go('#/homework/' + page.id);
       toast(`Checked: ${hw.score.percent}%`, 'ok');
     } catch (e) { toast(e.message, 'err'); busy($('#goHw', m.el), false); }
   };
@@ -618,6 +619,8 @@ route('/planner', plannerView);
 route('/study', lazy('./study.js', 'studyListView'));
 route('/study/:id', lazy('./study.js', 'studyView'));
 route('/review', lazy('./review.js', 'reviewView'));
+route('/homework', lazy('./homework.js', 'homeworkView'));
+route('/homework/:id', lazy('./homework.js', 'homeworkReportView'));
 route('/grades', lazy('./grades.js', 'gradesView'));
 route('/settings', settingsView);
 route('/progress', lazy('./extras.js', 'progressView'));

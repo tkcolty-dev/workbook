@@ -50,7 +50,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === '/') { e.preventDefault(); import('./palette.js').then(m => m.openPalette()); return; }
     if (e.key === '?') { e.preventDefault(); import('./palette.js').then(m => m.shortcutsHelp()); return; }
     if (e.key === 'g') { pendingG = Date.now(); return; }
-    if (pendingG && Date.now() - pendingG < 900) { pendingG = 0; const to = { h: '#/', n: '#/notebooks', s: '#/scan', p: '#/planner', t: '#/study', r: '#/review', d: '#/grades', o: '#/progress', ',': '#/settings' }[e.key]; if (to) { e.preventDefault(); go(to); return; } }
+    if (pendingG && Date.now() - pendingG < 900) { pendingG = 0; const to = { h: '#/', n: '#/notebooks', s: '#/scan', p: '#/planner', t: '#/study', w: '#/homework', r: '#/review', d: '#/grades', o: '#/progress', ',': '#/settings' }[e.key]; if (to) { e.preventDefault(); go(to); return; } }
   }
   if (viewKeys && !$('.modal-bg')) viewKeys(e);
 });
