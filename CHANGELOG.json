@@ -1,5 +1,15 @@
 [
   {
+    "version": "2.4.1",
+    "date": "2026-09-20",
+    "title": "Small fixes",
+    "items": [
+      "The theme button no longer pushes the settings gear out of the sidebar when “Dark at night” is on.",
+      "Long titles on the Home tiles and breadcrumbs are trimmed instead of spilling over.",
+      "The mini week on Home fits on narrow phones."
+    ]
+  },
+  {
     "version": "2.4.0",
     "date": "2026-09-20",
     "title": "Version number, update button and this log",

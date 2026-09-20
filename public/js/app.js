@@ -51,7 +51,7 @@ export function shell(active, content) {
   return view;
 }
 shell.reset = () => { const s = $('.shell'); if (s) s.dataset.uid = 'stale'; };
-const themeLabel = () => ({ auto: 'Auto theme', light: 'Light', dark: 'Dark', schedule: 'Dark at night' })[getTheme()] || 'Auto theme';
+const themeLabel = () => ({ auto: 'Auto', light: 'Light', dark: 'Dark', schedule: 'Night' })[getTheme()] || 'Auto';
 const setBadge = (id, v) => { const b = $('#' + id); if (!b) return; b.textContent = v > 99 ? '99+' : v; b.classList.toggle('hidden', !v); };
 export function updateReviewBadge(n) { if (typeof n === 'number') state.reviewDue = n; setBadge('reviewBadge', state.reviewDue || 0); setBadge('inboxBadge', state.inboxN || 0); setBadge('moreBadge', (state.reviewDue || 0) + (state.inboxN || 0)); }
 // "What's new": the update log. Opens by itself once per version (remembered on the account), or any time from the version button.

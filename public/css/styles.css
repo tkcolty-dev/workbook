@@ -97,7 +97,10 @@ a.notice:hover { border-color: var(--accent); border-left-color: var(--mark); }
 .mini-week .mw .bar i { display: block; width: 100%; background: var(--line); border-radius: 3px 3px 0 0; }
 .mini-week .mw.light .bar i { background: var(--green); } .mini-week .mw.ok .bar i { background: var(--accent); } .mini-week .mw.heavy .bar i { background: var(--red); }
 .mini-week .mw.today small { color: var(--mark-ink); background: var(--mark); border-radius: 4px; padding: 0 4px; }
-.mini-week .mw-lbl { margin-left: auto; font-size: 13px; color: var(--ink-2); font-weight: 600; }
+.mini-week .mw-lbl { margin-left: auto; font-size: 13px; color: var(--ink-2); font-weight: 600; white-space: nowrap; }
+@media (max-width: 480px) { .mini-week { gap: 3px; padding: 8px; } .mini-week .mw { width: 30px; } .mini-week .mw-lbl { font-size: 0; } .mini-week .mw-lbl svg { font-size: 13px; } }
+.page-head h1 { overflow-wrap: anywhere; }
+.crumbs span, .crumbs a { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 40vw; }
 .more-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .more-item { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 14px 6px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); text-decoration: none; color: var(--ink); font-size: 13px; font-weight: 600; position: relative; font-family: inherit; cursor: pointer; }
 .more-item svg { width: 24px; height: 24px; color: var(--tab, var(--accent)); }
@@ -114,8 +117,10 @@ a.notice:hover { border-color: var(--accent); border-left-color: var(--mark); }
 .nav a.active .badge { background: var(--ink); }
 .nav .kbd-hint { margin-left: auto; opacity: .6; }
 .sidebar .spacer { flex: 1; }
-.sidebar .side-foot { display: flex; gap: 6px; align-items: center; padding: 0 4px 6px; }
-.sidebar .side-foot .btn { flex: 1; }
+.sidebar .side-foot { display: flex; gap: 4px; align-items: center; padding: 0 4px 6px; min-width: 0; }
+.sidebar .side-foot .btn { flex: 0 0 auto; padding-left: 9px; padding-right: 9px; }
+.sidebar .side-foot #themeBtn { flex: 1 1 auto; min-width: 0; justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; }
+.sidebar .side-foot .version { color: var(--ink-3); font-size: 12px; }
 .userbox { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 10px; transition: background .12s; }
 .userbox:hover { background: var(--line-2); }
 .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--mark); color: var(--mark-ink); font-weight: 750; font-size: 14px; font-family: var(--display); }
@@ -229,7 +234,7 @@ kbd { font-family: inherit; font-size: 11px; background: var(--line-2); border: 
 /* ---------- today strip (home hero) ---------- */
 .today { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
 .today .t { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; text-decoration: none; color: inherit; display: flex; flex-direction: column; gap: 2px; min-height: 96px; position: relative; overflow: hidden; }
-.today .t b { font-family: var(--display); font-size: 30px; font-weight: 700; line-height: 1; letter-spacing: -.02em; }
+.today .t b { font-family: var(--display); font-size: 30px; font-weight: 700; line-height: 1.1; letter-spacing: -.02em; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .today .t span { font-size: 13px; color: var(--ink-3); }
 .today .t .lbl { font-size: 13px; font-weight: 600; color: var(--ink-2); }
 .today .t.hot b { background: linear-gradient(115deg, transparent 0 2%, var(--mark) 2% 98%, transparent 98%); color: var(--mark-ink); padding: 0 6px; display: inline-block; align-self: flex-start; }
